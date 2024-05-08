@@ -1,15 +1,6 @@
 name: 'FacetsCloud CI Integration'
 description: 'Register artifacts in FacetsCloud using facetsctl'
 inputs:
-  username:
-    description: 'FacetsCloud username'
-    required: true
-  access_token:
-    description: 'FacetsCloud access token'
-    required: true
-  cp_url:
-    description: 'URL of the Control Plane'
-    required: true
   docker_image:
     description: 'Docker image URL in the external registry'
     required: true
@@ -41,7 +32,7 @@ runs:
   steps:
     - name: Login to FacetsCloud
       run: |
-        facetsctl login -u ${{ secrets.USERNAME }} -t ${{ secrets.ACCESS_TOKEN }} -c ${{ secrets.CP_URL }}
+        facetsctl login -u ${{ secrets.FACETS_USERNAME }} -t ${{ secrets.FACETS_ACCESS_TOKEN }} -c ${{ secrets.FACETS_CP_URL }}
     - name: Register artifact
       run: |
         facetsctl register -i ${{ inputs.docker_image }} -s ${{ inputs.service }} -e ${{ inputs.external_id }} --git-ref ${{ inputs.git_ref }} ${{inputs.description && format('-d %s', inputs.description) }} ${{inputs.registry && format('--registry %s', inputs.registry) }} ${{inputs.registration_type && format('--registration-type %s', inputs.registration_type) }} ${{inputs.blueprint_name && format('--blueprint-name %s', inputs.blueprint_name) }}
