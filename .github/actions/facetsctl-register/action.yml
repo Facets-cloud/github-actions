@@ -1,0 +1,47 @@
+name: 'FacetsCloud CI Integration'
+description: 'Register artifacts in FacetsCloud using facetsctl'
+inputs:
+  username:
+    description: 'FacetsCloud username'
+    required: true
+  access_token:
+    description: 'FacetsCloud access token'
+    required: true
+  cp_url:
+    description: 'URL of the Control Plane'
+    required: true
+  docker_image:
+    description: 'Docker image URL in the external registry'
+    required: true
+  service:
+    description: 'Name of the CI integration service'
+    required: true
+  external_id:
+    description: 'External identifier for artifact'
+    required: true
+  git_ref:
+    description: 'Git reference provided in CI Rule'
+    required: true
+  description:
+    description: 'Description of the build'
+    required: false
+  registry:
+    description: 'Artifactory where image will be pushed'
+    required: false
+  registration_type:
+    description: 'Mode of registration for CI integration'
+    required: false
+  blueprint_name:
+    description: 'Blueprint name for CI Integration'
+    required: false
+
+runs:
+  using: 'docker'
+  image: 'docker://facetscloud/facetsctl:latest'
+  steps:
+    - name: Login to FacetsCloud
+      run: |
+        facetsctl login -u ${{ secrets.USERNAME }} -t ${{ secrets.ACCESS_TOKEN }} -c ${{ secrets.CP_URL }}
+    - name: Register artifact
+      run: |
+        facetsctl register -i ${{ inputs.docker_image }} -s ${{ inputs.service }} -e ${{ inputs.external_id }} --git-ref ${{ inputs.git_ref }} ${{inputs.description && format('-d %s', inputs.description) }} ${{inputs.registry && format('--registry %s', inputs.registry) }} ${{inputs.registration_type && format('--registration-type %s', inputs.registration_type) }} ${{inputs.blueprint_name && format('--blueprint-name %s', inputs.blueprint_name) }}
