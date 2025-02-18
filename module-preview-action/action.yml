@@ -16,8 +16,8 @@ inputs:
     description: "Run the action in dry-run mode (skip preview and secrets)"
     required: false
     default: "false"
-  test-run:
-    description: "Run the action in test-run mode artificial directories"
+  all-modules:
+    description: "Run the action for all modules in repo"
     required: false
     default: "false"
 
@@ -35,12 +35,12 @@ runs:
         unzip terraform.zip && mv terraform /usr/local/bin/ && rm terraform.zip
         pip install checkov
 
-    - name: Identify All Facets Modules (Test Run)
-      if: inputs.test-run == 'true'
+    - name: Identify All Facets Modules (All Modules)
+      if: inputs.all-modules == 'true'
       id: dry_run_dirs
       shell: bash
       run: |
-        echo "🚀 Step: Identify All Facets Modules (Test Run)"
+        echo "🚀 Step: Identify All Facets Modules (All Modules)"
 
         REPO_ROOT="."
         FACETS_DIRS=""
@@ -61,12 +61,12 @@ runs:
         echo "✅ Dry run mode complete."
     
 
-    - name: Identify Changed Directories (Non Dry Run)
-      if: inputs.test-run != 'true'
+    - name: Identify Changed Directories (Changed Modules)
+      if: inputs.all-modules != 'true'
       id: changed_dirs
       shell: bash
       run: |
-        echo "🚀 Step: Identify Changed Directories (Non Dry Run)"
+        echo "🚀 Step: Identify Changed Directories (Changed Modules)"
 
         echo "🔄 Fetching git changes..."
         if [ "${{ github.event_name }}" == "pull_request" ]; then
