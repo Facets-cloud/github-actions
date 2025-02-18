@@ -71,7 +71,7 @@ runs:
         echo "🔄 Fetching git changes..."
         if [ "${{ github.event_name }}" == "pull_request" ]; then
           echo "📌 Event: Pull Request. Fetching base ref '${{ github.event.pull_request.base.ref }}'..."
-          BASE_REF="origin/${{ github.event.pull_request.base.ref }}"
+          BASE_REF="${{ github.event.pull_request.base.sha }}"
         else
           echo "📌 Event: Push. Using before/after  commits..."
           BASE_REF="${{ github.event.before }}"
