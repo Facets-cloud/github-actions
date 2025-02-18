@@ -3,13 +3,13 @@ name: "Test Facets Module Preview Action"
 on:
   push:
     branches:
-      - main
+      - master
     paths:
       - 'module-preview-action/test/**'  # ✅ Only trigger when test files change
   pull_request:
     paths:
       - 'module-preview-action/test/**'  # ✅ Only run on test file changes
-
+  workflow_dispatch:  # ✅ Manual trigger
 
 jobs:
   test-action:
