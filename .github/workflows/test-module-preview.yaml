@@ -25,4 +25,4 @@ jobs:
           #          username: ${{ secrets.FACETS_USERNAME }}
           #          token: ${{ secrets.FACETS_API_TOKEN }}
           dry-run: true
-          test-run: true
+          all-modules: false
