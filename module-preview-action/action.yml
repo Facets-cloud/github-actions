@@ -35,32 +35,31 @@ runs:
         unzip terraform.zip && mv terraform /usr/local/bin/ && rm terraform.zip
         pip install checkov
 
-    - name: Identify Changed Directories (Dry Run)
+    - name: Identify All Facets Modules (Dry Run)
       if: inputs.test-run == 'true'
       id: dry_run_dirs
       shell: bash
       run: |
-        echo "🚀 Step: Identify Changed Directories (Dry Run)"
-        TEST_DIR="module-preview-action/test"
+        echo "🚀 Step: Identify All Facets Modules (Dry Run)"
+
+        REPO_ROOT="."
         FACETS_DIRS=""
 
-        echo "📂 Checking for existing directories inside '$TEST_DIR'..."
-        if [[ -d "$TEST_DIR" ]]; then
-          echo "✅ Directory '$TEST_DIR' exists. Scanning for subdirectories..."
-          for dir in "$TEST_DIR"/*/; do
-            if [[ -d "$dir" ]]; then
-              dir_name=$(basename "$dir")
-              echo "   ➡️ Found directory: $dir_name"
-              FACETS_DIRS="$FACETS_DIRS $dir"
-            fi
-          done
-        else
-          echo "⚠️ Warning: Test directory '$TEST_DIR' does not exist!"
+        echo "🔍 Scanning repository for Facets modules..."
+        for dir in $(find "$REPO_ROOT" -type f -name "facets.yaml" -exec dirname {} \; | sort -u); do
+          echo "   ➡️ Found Facets module: $dir"
+          FACETS_DIRS="$FACETS_DIRS $dir"
+        done
+
+        if [[ -z "$FACETS_DIRS" ]]; then
+          echo "✅ No Facets modules found. Skipping."
+          exit 0
         fi
 
-        echo "📌 Final list of dry run directories: $FACETS_DIRS"
+        echo "📦 Final list of Facets modules: $FACETS_DIRS"
         echo "dirs=$FACETS_DIRS" >> "$GITHUB_ENV"
-        echo "✅ Dry run mode complete. Exiting step."
+        echo "✅ Dry run mode complete."
+    
 
     - name: Identify Changed Directories (Non Dry Run)
       if: inputs.test-run != 'true'
