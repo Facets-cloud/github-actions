@@ -1,0 +1,8 @@
+{
+  "kind": "ecs_service",
+  "flavor": "rohit-ecs-service",
+  "version": "1.0",
+  "spec": {
+    "image": "nginx:latest"
+  }
+}

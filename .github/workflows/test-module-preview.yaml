@@ -1,0 +1,28 @@
+name: "Test Facets Module Preview Action"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'module-preview-action/test/**'  # ✅ Only trigger when test files change
+  pull_request:
+    paths:
+      - 'module-preview-action/test/**'  # ✅ Only run on test file changes
+
+
+jobs:
+  test-action:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Run Facets Module Preview Action (Local)
+        uses: ./module-preview-action  # Run from local repo
+        with:
+          #          control-plane-url: ${{ secrets.CONTROL_PLANE_URL }}
+          #          username: ${{ secrets.FACETS_USERNAME }}
+          #          token: ${{ secrets.FACETS_API_TOKEN }}
+          dry-run: true
+          test-run: true

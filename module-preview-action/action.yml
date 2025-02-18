@@ -1,0 +1,148 @@
+name: "Facets Module Preview & Security Scan"
+description: "Runs Terraform formatting checks, validation, Checkov security scanning, and Facets module preview."
+author: "Your Name"
+
+inputs:
+  control_plane_url:
+    description: "Facets Control Plane URL"
+    required: false  # Not required in dry-run mode
+  username:
+    description: "Facets Username"
+    required: false  # Not required in dry-run mode
+  token:
+    description: "Facets API Token"
+    required: false  # Not required in dry-run mode
+  dry-run:
+    description: "Run the action in dry-run mode (skip preview and secrets)"
+    required: false
+    default: "false"
+  test-run:
+    description: "Run the action in test-run mode artificial directories"
+    required: false
+    default: "false"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Install Dependencies (Facets, Terraform, Checkov)
+      shell: bash
+      run: |
+        sudo apt-get install -y python3 python3-pip curl unzip jq git
+        curl -fsSL https://releases.hashicorp.com/terraform/1.5.0/terraform_1.5.0_linux_amd64.zip -o terraform.zip
+        unzip terraform.zip && mv terraform /usr/local/bin/ && rm terraform.zip
+        pip install checkov
+
+    - name: Identify Changed Directories (Dry Run)
+      if: inputs.test-run == 'true'
+      id: dry_run_dirs
+      shell: bash
+      run: |
+        echo "🚀 Step: Identify Changed Directories (Dry Run)"
+        TEST_DIR="module-preview-action/test"
+        FACETS_DIRS=""
+
+        echo "📂 Checking for existing directories inside '$TEST_DIR'..."
+        if [[ -d "$TEST_DIR" ]]; then
+          echo "✅ Directory '$TEST_DIR' exists. Scanning for subdirectories..."
+          for dir in "$TEST_DIR"/*/; do
+            if [[ -d "$dir" ]]; then
+              dir_name=$(basename "$dir")
+              echo "   ➡️ Found directory: $dir_name"
+              FACETS_DIRS="$FACETS_DIRS $dir"
+            fi
+          done
+        else
+          echo "⚠️ Warning: Test directory '$TEST_DIR' does not exist!"
+        fi
+
+        echo "📌 Final list of dry run directories: $FACETS_DIRS"
+        echo "dirs=$FACETS_DIRS" >> "$GITHUB_ENV"
+        echo "✅ Dry run mode complete. Exiting step."
+
+    - name: Identify Changed Directories (Non Dry Run)
+      if: inputs.test-run != 'true'
+      id: changed_dirs
+      shell: bash
+      run: |
+        echo "🚀 Step: Identify Changed Directories (Non Dry Run)"
+
+        echo "🔄 Fetching git changes..."
+        if [ "${{ github.event_name }}" == "pull_request" ]; then
+          echo "📌 Event: Pull Request. Fetching base ref '${{ github.event.pull_request.base.ref }}'..."
+          git fetch origin ${{ github.event.pull_request.base.ref }} --depth=1
+          BASE_REF="origin/${{ github.event.pull_request.base.ref }}"
+          HEAD_REF="${{ github.event.pull_request.head.sha }}"
+        else
+          echo "📌 Event: Push. Using before/after commits..."
+          BASE_REF="${{ github.event.before }}"
+          HEAD_REF="${{ github.event.after }}"
+        fi
+
+        echo "🔍 Finding changed directories..."
+        CHANGED_DIRS=$(git diff --name-only $BASE_REF $HEAD_REF | awk -F'/' '{print $1}' | sort -u | uniq)
+        echo "📝 Changed directories detected: $CHANGED_DIRS"
+
+        FACETS_DIRS=""
+        for dir in $CHANGED_DIRS; do
+          if [ -f "$dir/facets.yaml" ]; then
+            echo "   ➡️ Facets module detected: $dir"
+            FACETS_DIRS="$FACETS_DIRS $dir"
+          fi
+        done
+
+        if [[ -z "$FACETS_DIRS" ]]; then
+          echo "✅ No modified Facets modules found. Skipping."
+          exit 0
+        fi
+
+        echo "📦 Final list of changed Facets modules: $FACETS_DIRS"
+        echo "dirs=$FACETS_DIRS" >> "$GITHUB_ENV"
+        echo "✅ Step complete."
+    
+    
+
+    - name: Run Terraform Formatting Check (Fail on Incorrect Formatting)
+      if: env.dirs != ''
+      shell: bash
+      run: |
+        for dir in $dirs; do
+          echo "🔍 Checking Terraform formatting in $dir"
+          terraform fmt -recursive -check "$dir" || (echo "❌ Terraform formatting issues found in $dir. Run 'terraform fmt' locally." && exit 1)
+        done
+
+    - name: Run Terraform Validate
+      if: env.dirs != ''
+      shell: bash
+      run: |
+        for dir in $dirs; do
+          echo "✅ Validating Terraform in $dir"
+          terraform  -chdir="$dir" init -backend=false 
+          terraform -chdir="$dir" validate 
+        done
+
+    - name: Run Checkov Security Scan
+      if: env.dirs != ''
+      shell: bash
+      run: |
+        for dir in $dirs; do
+          echo "🔍 Running Checkov security scan in $dir"
+          checkov -d "$dir" --quiet --hard-fail-on HIGH,CRITICAL --framework terraform,kubernetes --output cli
+        done
+
+    - name: Preview Facets Module
+      if: env.dirs != '' && inputs.dry-run != 'true'
+      shell: bash
+      run: |
+        for dir in $dirs; do
+          if [[ -f "$dir/facets.yaml" ]]; then
+            echo "🔍 Registering Facets module for preview in $dir..."
+            curl -s https://facets-cloud.github.io/facets-schemas/scripts/module_register.sh | bash -s -- \
+              -c "${{ inputs.control_plane_url }}" \
+              -u "${{ inputs.username }}" \
+              -t "${{ inputs.token }}" \
+              -p "$dir"
+          fi
+        done
