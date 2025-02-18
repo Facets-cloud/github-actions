@@ -72,15 +72,13 @@ runs:
         if [ "${{ github.event_name }}" == "pull_request" ]; then
           echo "📌 Event: Pull Request. Fetching base ref '${{ github.event.pull_request.base.ref }}'..."
           BASE_REF="origin/${{ github.event.pull_request.base.ref }}"
-          HEAD_REF="${{ github.event.pull_request.head.sha }}"
         else
           echo "📌 Event: Push. Using before/after  commits..."
           BASE_REF="${{ github.event.before }}"
-          HEAD_REF="${{ github.event.after }}"
         fi
 
         echo "🔍 Finding changed directories... git diff ($BASE_REF/$HEAD_REF)"
-        CHANGED_DIRS=$(git diff --name-only $BASE_REF $HEAD_REF | xargs -I {} dirname {} | sort -u)
+        CHANGED_DIRS=$(git diff --name-only "$BASE_REF...HEAD" | xargs -I {} dirname {} | sort -u)
         echo "📝 Changed directories detected: $CHANGED_DIRS"
 
         FACETS_DIRS=""
