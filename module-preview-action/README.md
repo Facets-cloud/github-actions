@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest  # Ensure Ubuntu is used
     steps:
       - name: Run Facets Preview & Security Scan
-        uses: Facets-cloud/github-actions/module-preview-action@v1/facets-preview-action@master
+        uses: Facets-cloud/github-actions/module-preview-action@master
         with:
           control_plane_url: ${{ secrets.CONTROL_PLANE_URL }}
           username: ${{ secrets.FACETS_USERNAME }}
@@ -45,7 +45,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Facets Preview & Security Scan
-        uses: Facets-cloud/github-actions/module-preview-action@v1/facets-preview-action@master
+        uses: Facets-cloud/github-actions/module-preview-action@master
         with:
           control_plane_url: ${{ secrets.CONTROL_PLANE_URL }}
           username: ${{ secrets.FACETS_USERNAME }}
