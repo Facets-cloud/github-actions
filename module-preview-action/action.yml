@@ -62,7 +62,7 @@ runs:
         echo "📦 Final list of Facets modules: $FACETS_DIRS"
         echo "dirs=$FACETS_DIRS" >> "$GITHUB_ENV"
         echo "✅ Dry run mode complete."
-    
+
 
     - name: Identify Changed Directories (Changed Modules)
       if: inputs.all-modules != 'true'
@@ -100,8 +100,8 @@ runs:
         echo "📦 Final list of changed Facets modules: $FACETS_DIRS"
         echo "dirs=$FACETS_DIRS" >> "$GITHUB_ENV"
         echo "✅ Step complete."
-    
-    
+
+
 
     - name: Run Terraform Formatting Check (Fail on Incorrect Formatting)
       if: env.dirs != ''
@@ -131,6 +131,23 @@ runs:
           checkov -d "$dir" --quiet --hard-fail-on HIGH,CRITICAL --framework terraform,kubernetes --output cli
         done
 
+    - name: Get Git Info
+      if: env.dirs != '' && inputs.dry-run != 'true'
+      id: git_info
+      shell: bash
+      run: |
+        # Get commit ID
+        COMMIT_ID=$(git rev-parse HEAD)
+        echo "commit_id=$COMMIT_ID" >> $GITHUB_ENV
+        
+        # Construct Git URL
+        REPO_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+        GIT_URL="${REPO_URL}/commit/${COMMIT_ID}"
+        echo "git_url=$GIT_URL" >> $GITHUB_ENV
+        
+        echo "🔍 Git Commit ID: $COMMIT_ID"
+        echo "🔍 Git URL: $GIT_URL"
+
     - name: Preview Facets Module
       if: env.dirs != '' && inputs.dry-run != 'true'
       shell: bash
@@ -142,6 +159,8 @@ runs:
               -c "${{ inputs.control_plane_url }}" \
               -u "${{ inputs.username }}" \
               -t "${{ inputs.token }}" \
-              -p "$dir" -a
+              -p "$dir" -a \
+              -g "${{ env.git_url }}" \
+              -r "${{ env.commit_id }}"
           fi
         done
