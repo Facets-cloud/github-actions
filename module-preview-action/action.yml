@@ -20,8 +20,16 @@ inputs:
     description: "Run the action for all modules in repo"
     required: false
     default: "false"
-  skip_terraform_validation:
+  skip-terraform-validation:
     description: "Skip the Terraform Validate step"
+    required: false
+    default: "false"
+  auto-create-intent:
+    description: "Automatically create intent if not exists"
+    required: false
+    default: "false"
+  publish:
+    description: "Publish the module"
     required: false
     default: "false"
 
@@ -40,7 +48,7 @@ runs:
         sudo apt-get install -y python3 python3-pip curl unzip jq git
         curl -fsSL https://releases.hashicorp.com/terraform/1.5.7/terraform_1.5.7_linux_amd64.zip -o terraform.zip
         unzip terraform.zip && mv terraform /usr/local/bin/ && rm terraform.zip
-        pip install checkov
+        pip install git+https://github.com/Facets-cloud/module-development-cli.git
 
     - name: Identify All Facets Modules (All Modules)
       if: inputs.all-modules == 'true'
@@ -105,36 +113,6 @@ runs:
         echo "dirs=$FACETS_DIRS" >> "$GITHUB_ENV"
         echo "✅ Step complete."
 
-
-
-    - name: Run Terraform Formatting Check (Fail on Incorrect Formatting)
-      if: env.dirs != ''
-      shell: bash
-      run: |
-        for dir in $dirs; do
-          echo "🔍 Checking Terraform formatting in $dir"
-          terraform fmt -recursive -check "$dir" || (echo "❌ Terraform formatting issues found in $dir. Run 'terraform fmt' locally." && exit 1)
-        done
-
-    - name: Run Terraform Validate
-      if: env.dirs != '' && inputs.skip_terraform_validation != 'true'
-      shell: bash
-      run: |
-        for dir in $dirs; do
-          echo "✅ Validating Terraform in $dir"
-          terraform  -chdir="$dir" init -backend=false 
-          terraform -chdir="$dir" validate 
-        done
-
-    - name: Run Checkov Security Scan
-      if: env.dirs != ''
-      shell: bash
-      run: |
-        for dir in $dirs; do
-          echo "🔍 Running Checkov security scan in $dir"
-          checkov -d "$dir" --quiet --hard-fail-on HIGH,CRITICAL --framework terraform,kubernetes --output cli
-        done
-
     - name: Get Git Info
       if: env.dirs != '' && inputs.dry-run != 'true'
       id: git_info
@@ -152,19 +130,21 @@ runs:
         echo "🔍 Git Commit ID: $COMMIT_ID"
         echo "🔍 Git URL: $GIT_URL"
 
-    - name: Preview Facets Module
+    - name: FTF Login
+      if: env.dirs != ''
+      shell: bash
+      run: |
+        echo "✅ Login to CP using ftf"
+        ftf login -c "${{ inputs.control_plane_url }}" -u "${{ inputs.username }}" -t "${{ inputs.token }}" -p default
+
+
+    - name: Register Facets Module
       if: env.dirs != '' && inputs.dry-run != 'true'
       shell: bash
       run: |
         for dir in $dirs; do
           if [[ -f "$dir/facets.yaml" ]]; then
-            echo "🔍 Registering Facets module for preview in $dir..."
-            curl -s https://facets-cloud.github.io/facets-schemas/scripts/module_register.sh | bash -s -- \
-              -c "${{ inputs.control_plane_url }}" \
-              -u "${{ inputs.username }}" \
-              -t "${{ inputs.token }}" \
-              -p "$dir" -a \
-              -g "${{ env.git_url }}" \
-              -r "${{ env.commit_id }}"
+            echo "🔍 Registering Facets module for $([ \"${{ inputs.publish }}\" = \"true\" ] && echo publishing || echo preview) in $dir..."
+            ftf preview-module $dir -a "${{ inputs.auto-create-intent }}" -r "${{ env.commit_id }}" -g "${{ env.git_url }}" --publish "${{ inputs.publish }}"  --profile default --skip-terraform-validation "${{ inputs.skip-terraform-validation }}"
           fi
         done
