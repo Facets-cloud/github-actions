@@ -20,6 +20,10 @@ inputs:
     description: "Run the action for all modules in repo"
     required: false
     default: "false"
+  skip_terraform_validation:
+    description: "Skip the Terraform Validate step"
+    required: false
+    default: "false"
 
 runs:
   using: "composite"
@@ -113,7 +117,7 @@ runs:
         done
 
     - name: Run Terraform Validate
-      if: env.dirs != ''
+      if: env.dirs != '' && inputs.skip_terraform_validation != 'true'
       shell: bash
       run: |
         for dir in $dirs; do
