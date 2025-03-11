@@ -47,6 +47,11 @@ runs:
       run: |
           touch ./requirements.txt
 
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: "pip"
+
     - name: Install Dependencies (Facets, Terraform, Checkov)
       shell: bash
       run: |
