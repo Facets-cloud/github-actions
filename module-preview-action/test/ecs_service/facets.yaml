@@ -2,9 +2,8 @@ intent: ecs_service
 flavor: rohit-ecs-service
 clouds:
   - aws
-
-version: 1.0
-
+description : "test"
+version: "1.0"
 spec:
   type: object
   properties:
@@ -12,17 +11,14 @@ spec:
       type: string
       description: "The Docker image to use for the ECS service."
   required: ["image"]
-
 inputs:
   ecs_cluster_details:
-    type: "@output/ecs_cluster_details"
+    type: "@outputs/ecs_cluster_details"
   aws_vpc_details:
-    type: "@output/aws_vpc_details"
-
+    type: "@outputs/aws_vpc_details"
 outputs:
   default:
-    type: "@output/ecs_service_details"
-
+    type: "@outputs/ecs_service_details"
 sample:
   kind: ecs_service
   flavor: rohit-ecs-service
