@@ -41,6 +41,11 @@ runs:
       with:
         fetch-depth: 0
 
+    # This step is needed since setup-python fails if it doesnt detect either of these two files
+    - if: hashFiles('**/requirements.txt', '**/pyproject.toml') == ''
+      shell: bash
+      run: |
+          touch ./requirements.txt
 
     - uses: actions/setup-python@v5
       with:
