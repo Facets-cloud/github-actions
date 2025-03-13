@@ -27,7 +27,7 @@ inputs:
   auto-create-intent:
     description: "Automatically create intent if not exists"
     required: false
-    default: "true"
+    default: "false"
   publish:
     description: "Publish the module"
     required: false
@@ -66,7 +66,7 @@ runs:
 
     - name: Identify All Facets Modules (All Modules)
       if: inputs.all-modules == 'true'
-      id: dry_run_dirs
+      id: all_dirs
       shell: bash
       run: |
         echo "🚀 Step: Identify All Facets Modules (All Modules)"
@@ -145,11 +145,23 @@ runs:
         echo "🔍 Git URL: $GIT_URL"
 
     - name: FTF Login
-      if: env.dirs != ''
+      if: env.dirs != '' && inputs.dry-run != 'true'
       shell: bash
       run: |
         echo "✅ Login to CP using ftf"
         ftf login -c "${{ inputs.control_plane_url }}" -u "${{ inputs.username }}" -t "${{ inputs.token }}" -p default
+
+    - name: FTF Validate Directory
+      if: env.dirs != '' && inputs.dry-run == 'true'
+      shell: bash
+      run: |
+        for dir in $dirs; do
+          if [[ -f "$dir/facets.yaml" ]]; then
+            echo "⏳ Validating Facets Module in directory $dir"
+            ftf validate-directory $dir --check-only true --skip-terraform-validation "${{ inputs.skip-terraform-validation }}"
+            echo "✔️ Facets Module in directory $dir validated successfully."
+          fi
+        done
 
 
     - name: Register Facets Module
@@ -159,6 +171,6 @@ runs:
         for dir in $dirs; do
           if [[ -f "$dir/facets.yaml" ]]; then
             echo "🔍 Registering Facets module for $([ \"${{ inputs.publish }}\" = \"true\" ] && echo publishing || echo preview) in $dir..."
-            ftf preview-module $dir -a "${{ inputs.auto-create-intent }}" -r "${{ env.commit_id }}" -g "${{ env.git_url }}" --publish "${{ inputs.publish }}"  --profile default --skip-terraform-validation "${{ inputs.skip-terraform-validation }}"
+            ftf preview-module $dir -a "${{ inputs.auto-create-intent }}" -r "${{ env.commit_id }}" -g "${{ env.git_url }}" --publish "${{ inputs.publish }}"  --publishable "${{ inputs.publishable }}" --profile default --skip-terraform-validation "${{ inputs.skip-terraform-validation }}"
           fi
         done
