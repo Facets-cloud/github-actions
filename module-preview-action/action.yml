@@ -27,9 +27,13 @@ inputs:
   auto-create-intent:
     description: "Automatically create intent if not exists"
     required: false
-    default: "false"
+    default: "true"
   publish:
     description: "Publish the module"
+    required: false
+    default: "false"
+  publishable:
+    description: "Whether the modules registered in preview mode are publishable or not. This is not required if publish is set to true."
     required: false
     default: "false"
 
