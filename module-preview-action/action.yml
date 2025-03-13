@@ -158,7 +158,7 @@ runs:
         for dir in $dirs; do
           if [[ -f "$dir/facets.yaml" ]]; then
             echo "⏳ Validating Facets Module in directory $dir"
-            ftf validate-directory $dir --check-only true --skip-terraform-validation "${{ inputs.skip-terraform-validation }}"
+            ftf validate-directory $dir --check-only --skip-terraform-validation "${{ inputs.skip-terraform-validation }}"
             echo "✔️ Facets Module in directory $dir validated successfully."
           fi
         done
