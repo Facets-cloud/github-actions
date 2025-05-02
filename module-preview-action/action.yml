@@ -161,14 +161,19 @@ runs:
       shell: bash
       run: |
         set -e
-        set -o pipefail
+        failure=0
         for dir in $dirs; do
           if [[ -f "$dir/facets.yaml" ]]; then
             echo "⏳ Validating Facets Module in directory $dir"
-            $(ftf validate-directory $dir --check-only --skip-terraform-validation "${{ inputs.skip-terraform-validation }}")
-            echo "✔️ Facets Module in directory $dir validated successfully."
+            ftf validate-directory $dir --check-only --skip-terraform-validation "${{ inputs.skip-terraform-validation }}" || failure=1
+            if [[ $failure -eq 0 ]]; then
+              echo "✔️ Facets Module in directory $dir validated successfully."
+            fi
           fi
         done
+        if [[ $failure -eq 1 ]]; then
+          exit 1
+        fi
     - name: Register Facets Module
       if: env.dirs != '' && inputs.dry-run != 'true'
       shell: bash
