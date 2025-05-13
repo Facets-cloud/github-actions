@@ -26,4 +26,3 @@ jobs:
           #          token: ${{ secrets.FACETS_API_TOKEN }}
           dry-run: true
           all-modules: false
-          ftf_cli_version: 0.2.1
