@@ -22,6 +22,7 @@ jobs:
           control_plane_url: ${{ secrets.CONTROL_PLANE_URL }}
           username: ${{ secrets.FACETS_USERNAME }}
           token: ${{ secrets.FACETS_API_TOKEN }}
+          ftf_cli_version: 0.2.1 # Optional: Specify only if you want to use a specific version of the CLI
 ```
 
 ---
@@ -50,6 +51,7 @@ jobs:
           control_plane_url: ${{ secrets.CONTROL_PLANE_URL }}
           username: ${{ secrets.FACETS_USERNAME }}
           token: ${{ secrets.FACETS_API_TOKEN }}
+          ftf_cli_version: 0.2.1 # Optional: Specify only if you want to use a specific version of the CLI
 ```
 
 ## 🌱 Enabling Dry Run Mode
