@@ -117,7 +117,14 @@ runs:
         fi
 
         echo "🔍 Finding changed directories... git diff ($BASE_REF/$HEAD_REF)"
-        CHANGED_DIRS=$(git diff --name-only "$BASE_REF...HEAD" | xargs -I {} dirname {} | sort -u)
+        
+        # Handle the case when BASE_REF is the null SHA (first commit)
+        if [ "$BASE_REF" = "0000000000000000000000000000000000000000" ]; then
+          echo "📝 First commit detected, getting all files in HEAD"
+          CHANGED_DIRS=$(git diff --name-only --diff-filter=A HEAD | xargs -I {} dirname {} | sort -u)
+        else
+          CHANGED_DIRS=$(git diff --name-only "$BASE_REF...HEAD" | xargs -I {} dirname {} | sort -u)
+        fi
         echo "📝 Changed directories detected: $CHANGED_DIRS"
 
         FACETS_DIRS=""
