@@ -1,0 +1,388 @@
+name: "Facets Module CI"
+description: "CI for a Facets modules repo (modules/{intent}/{flavor}/{version}): preview on PR, publish on push, cleanup on PR close — driven by the raptor CLI."
+author: "Facets"
+
+inputs:
+  control_plane_url:
+    description: "Facets Control Plane URL (provisioned as the CONTROL_PLANE_URL secret)."
+    required: true
+  username:
+    description: "Facets username (provisioned as the FACETS_USERNAME secret)."
+    required: true
+  token:
+    description: "Facets API token (provisioned as the FACETS_TOKEN secret)."
+    required: true
+  github_token:
+    description: "GitHub token. Optional; enables the PR preview comment (preview mode) and reading the PR's commit SHAs for ownership-checked cleanup (cleanup mode). When absent, those features are skipped."
+    required: false
+    default: ""
+  raptor_version:
+    description: "raptor CLI version to install: 'latest' or an exact release tag (e.g. v1.2.3)."
+    required: false
+    default: "latest"
+  all-modules:
+    description: "When 'true', operate on every module under <path-prefix>modules/ instead of only the ones changed by the triggering event."
+    required: false
+    default: "false"
+  mode:
+    description: "One of auto|preview|publish|cleanup. 'auto' (default) derives the mode from the event: pull_request opened/synchronize/reopened -> preview; push -> publish; pull_request closed -> cleanup."
+    required: false
+    default: "auto"
+  path-prefix:
+    description: "Sub-path to the modules/ tree, relative to the repo root (e.g. 'infra/' when modules live at infra/modules/...). Empty means modules/ is at the repo root."
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Install raptor CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+        VERSION="${{ inputs.raptor_version }}"
+        if [ -z "$VERSION" ] || [ "$VERSION" = "latest" ]; then
+          URL="https://github.com/Facets-cloud/raptor-releases/releases/latest/download/raptor-linux-amd64"
+        else
+          URL="https://github.com/Facets-cloud/raptor-releases/releases/download/${VERSION}/raptor-linux-amd64"
+        fi
+        echo "Installing raptor from ${URL}"
+        curl -fsSL -o raptor "$URL"
+        chmod +x raptor
+        sudo mv raptor /usr/local/bin/raptor
+        raptor version 2>/dev/null || raptor --version 2>/dev/null || true
+
+    - name: Configure raptor auth and resolve mode
+      shell: bash
+      env:
+        CP_URL: ${{ inputs.control_plane_url }}
+        CP_USER: ${{ inputs.username }}
+        CP_TOKEN: ${{ inputs.token }}
+        INPUT_MODE: ${{ inputs.mode }}
+        EVENT_NAME: ${{ github.event_name }}
+        EVENT_ACTION: ${{ github.event.action }}
+      run: |
+        set -euo pipefail
+        # raptor reads these three env vars directly and treats them as the
+        # highest-priority auth. There is no non-interactive `raptor login`.
+        {
+          echo "CONTROL_PLANE_URL=${CP_URL}"
+          echo "FACETS_USERNAME=${CP_USER}"
+          echo "FACETS_TOKEN=${CP_TOKEN}"
+        } >> "$GITHUB_ENV"
+
+        MODE="${INPUT_MODE:-auto}"
+        if [ "$MODE" = "auto" ] || [ -z "$MODE" ]; then
+          case "$EVENT_NAME" in
+            pull_request|pull_request_target)
+              if [ "$EVENT_ACTION" = "closed" ]; then MODE="cleanup"; else MODE="preview"; fi
+              ;;
+            push)
+              MODE="publish"
+              ;;
+            *)
+              echo "::error::Cannot derive mode from event '${EVENT_NAME}'. Set the 'mode' input explicitly (preview|publish|cleanup)."
+              exit 1
+              ;;
+          esac
+        fi
+        case "$MODE" in
+          preview|publish|cleanup) ;;
+          *) echo "::error::Invalid mode '${MODE}' (expected auto|preview|publish|cleanup)."; exit 1 ;;
+        esac
+        echo "Resolved mode: ${MODE} (event=${EVENT_NAME}, action=${EVENT_ACTION:-none})"
+        echo "MODE=${MODE}" >> "$GITHUB_ENV"
+
+    - name: Detect target module directories
+      shell: bash
+      env:
+        ALL_MODULES: ${{ inputs.all-modules }}
+        PATH_PREFIX: ${{ inputs.path-prefix }}
+        EVENT_NAME: ${{ github.event_name }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        PUSH_BEFORE: ${{ github.event.before }}
+        PUSH_AFTER: ${{ github.sha }}
+      run: |
+        set -uo pipefail
+
+        PREFIX="${PATH_PREFIX}"
+        if [ -n "$PREFIX" ] && [ "${PREFIX%/}" = "$PREFIX" ]; then
+          PREFIX="${PREFIX}/"
+        fi
+        MODULES_ROOT="${PREFIX}modules"
+        echo "Modules root: ${MODULES_ROOT}"
+
+        collect_all() {
+          if [ -d "$MODULES_ROOT" ]; then
+            find "$MODULES_ROOT" -type f -name facets.yaml -exec dirname {} \; | sort -u
+          fi
+        }
+
+        changed_files() {
+          if [ "$EVENT_NAME" = "push" ]; then
+            if [ -z "$PUSH_BEFORE" ] || [ "$PUSH_BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              # New branch or first push: the before-SHA is all zeros, so diff the
+              # pushed commit against its parent(s) instead.
+              git diff-tree --no-commit-id --name-only -r "$PUSH_AFTER"
+            else
+              git diff --name-only "${PUSH_BEFORE}..${PUSH_AFTER}"
+            fi
+          else
+            # pull_request / pull_request_target: base..HEAD. HEAD is the checkout
+            # merge commit; the three-dot form diffs against the merge base.
+            git diff --name-only "${PR_BASE_SHA}...HEAD"
+          fi
+        }
+
+        if [ "$ALL_MODULES" = "true" ]; then
+          echo "all-modules=true: scanning ${MODULES_ROOT} for every facets.yaml"
+          CANDIDATES="$(collect_all || true)"
+        else
+          CANDIDATES="$(changed_files | xargs -r -I{} dirname {} | sort -u || true)"
+        fi
+
+        DIRS=""
+        for d in $CANDIDATES; do
+          # Keep only directories under <prefix>modules/ that contain a facets.yaml.
+          case "$d/" in
+            "$MODULES_ROOT"/*) ;;
+            *) continue ;;
+          esac
+          if [ -f "$d/facets.yaml" ]; then
+            DIRS="$DIRS $d"
+          fi
+        done
+        # shellcheck disable=SC2086  # deliberately re-split the accumulated space-separated list
+        DIRS="$(printf '%s\n' $DIRS | sed '/^$/d' | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+
+        if [ -z "$DIRS" ]; then
+          echo "No target module directories detected."
+        else
+          echo "Target module directories:"
+          for d in $DIRS; do echo "  - $d"; done
+        fi
+        echo "dirs=${DIRS}" >> "$GITHUB_ENV"
+
+    - name: Preview modules (pull request)
+      if: env.MODE == 'preview' && env.dirs != ''
+      shell: bash
+      env:
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        set -uo pipefail
+        FAILURES="${RUNNER_TEMP}/ci_failures"
+        COMMENT="${RUNNER_TEMP}/preview_comment.md"
+
+        # Read a top-level scalar key (intent/flavor/version) from a module's
+        # facets.yaml. Top-level keys have no leading whitespace; surrounding
+        # quotes and trailing comments are stripped.
+        meta() {
+          sed -n -E "s/^$2:[[:space:]]*(.*)$/\1/p" "$1/facets.yaml" | head -n1 \
+            | sed -E "s/[[:space:]]*#.*$//; s/^[\"']//; s/[\"'][[:space:]]*$//; s/[[:space:]]*$//"
+        }
+
+        {
+          echo "<!-- facets-module-ci:preview -->"
+          echo "### Facets module preview"
+          echo ""
+          echo "This branch now owns the single **preview slot** for each module below (concurrent PRs on the same module: last push wins)."
+          echo ""
+          echo "| Module | Type | Flavor | Version | Result |"
+          echo "|---|---|---|---|---|"
+        } > "$COMMENT"
+
+        # shellcheck disable=SC2086,SC2154  # $dirs is an intentional space-separated list injected via $GITHUB_ENV
+        for dir in $dirs; do
+          echo "::group::Preview ${dir}"
+          TYPE="$(meta "$dir" intent)"; FLAVOR="$(meta "$dir" flavor)"; VERSION="$(meta "$dir" version)"
+          REF="${TYPE}/${FLAVOR}/${VERSION}"
+          RESULT="previewed"
+          OK=1
+
+          if [ -z "$TYPE" ] || [ -z "$FLAVOR" ] || [ -z "$VERSION" ]; then
+            echo "::error::Could not read intent/flavor/version from ${dir}/facets.yaml"
+            echo "${dir} (metadata)" >> "$FAILURES"
+            RESULT="bad facets.yaml"; OK=0
+          fi
+
+          if [ "$OK" = "1" ]; then
+            echo "Validating ${REF} (dry-run)..."
+            if ! raptor create iac-module -f "$dir" --dry-run; then
+              echo "::error::Validation failed for ${REF}"
+              echo "${REF} (validate)" >> "$FAILURES"
+              RESULT="validation failed"; OK=0
+            fi
+          fi
+
+          if [ "$OK" = "1" ]; then
+            echo "Registering feature-branch preview for ${REF} at ${PR_HEAD_SHA}..."
+            if ! raptor create iac-module -f "$dir" --feature-branch --git-ref "$PR_HEAD_SHA"; then
+              echo "::error::Preview registration failed for ${REF}"
+              echo "${REF} (preview)" >> "$FAILURES"
+              RESULT="preview failed"; OK=0
+            fi
+          fi
+
+          echo "| \`${dir}\` | ${TYPE:-?} | ${FLAVOR:-?} | ${VERSION:-?} | ${RESULT} |" >> "$COMMENT"
+          echo "::endgroup::"
+        done
+
+        {
+          echo ""
+          echo "_Previews are unpublishable feature-branch registrations pinned to the PR head commit. They are cleaned up when this PR is closed (ownership-checked)._"
+        } >> "$COMMENT"
+
+    - name: Upsert preview PR comment
+      if: env.MODE == 'preview' && env.dirs != '' && inputs.github_token != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        set -uo pipefail
+        COMMENT="${RUNNER_TEMP}/preview_comment.md"
+        if [ ! -f "$COMMENT" ]; then
+          echo "No preview comment body found; nothing to post."
+          exit 0
+        fi
+        MARKER="facets-module-ci:preview"
+        EXISTING="$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
+          --jq ".[] | select(.body | contains(\"${MARKER}\")) | .id" 2>/dev/null | head -n1 || true)"
+        if [ -n "$EXISTING" ]; then
+          echo "Updating existing preview comment (${EXISTING})"
+          gh api -X PATCH "repos/${REPO}/issues/comments/${EXISTING}" -F body=@"$COMMENT" >/dev/null
+        else
+          echo "Creating preview comment on PR #${PR_NUMBER}"
+          gh api -X POST "repos/${REPO}/issues/${PR_NUMBER}/comments" -F body=@"$COMMENT" >/dev/null
+        fi
+
+    - name: Publish modules (push)
+      if: env.MODE == 'publish' && env.dirs != ''
+      shell: bash
+      run: |
+        set -uo pipefail
+        FAILURES="${RUNNER_TEMP}/ci_failures"
+
+        meta() {
+          sed -n -E "s/^$2:[[:space:]]*(.*)$/\1/p" "$1/facets.yaml" | head -n1 \
+            | sed -E "s/[[:space:]]*#.*$//; s/^[\"']//; s/[\"'][[:space:]]*$//; s/[[:space:]]*$//"
+        }
+
+        # shellcheck disable=SC2086,SC2154  # $dirs is an intentional space-separated list injected via $GITHUB_ENV
+        for dir in $dirs; do
+          echo "::group::Publish ${dir}"
+          TYPE="$(meta "$dir" intent)"; FLAVOR="$(meta "$dir" flavor)"; VERSION="$(meta "$dir" version)"
+          if [ -z "$TYPE" ] || [ -z "$FLAVOR" ] || [ -z "$VERSION" ]; then
+            echo "::error::Could not read intent/flavor/version from ${dir}/facets.yaml"
+            echo "${dir} (metadata)" >> "$FAILURES"
+            echo "::endgroup::"; continue
+          fi
+          REF="${TYPE}/${FLAVOR}/${VERSION}"
+
+          # Upload as PREVIEW. Git provenance is auto-detected from the work tree
+          # (HEAD == the pushed commit on a push build).
+          echo "Uploading ${REF}..."
+          if ! raptor create iac-module -f "$dir"; then
+            echo "::error::Upload failed for ${REF}"
+            echo "${REF} (upload)" >> "$FAILURES"
+            echo "::endgroup::"; continue
+          fi
+
+          echo "Publishing ${REF}..."
+          if ! raptor publish iac-module "$REF"; then
+            echo "::error::Publish failed for ${REF}"
+            echo "${REF} (publish)" >> "$FAILURES"
+            echo "::endgroup::"; continue
+          fi
+          echo "Published ${REF}"
+          echo "::endgroup::"
+        done
+
+    - name: Cleanup previews (pull request closed)
+      if: env.MODE == 'cleanup' && env.dirs != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        HAS_TOKEN: ${{ inputs.github_token != '' }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        set -uo pipefail
+        FAILURES="${RUNNER_TEMP}/ci_failures"
+
+        if [ "$HAS_TOKEN" != "true" ]; then
+          echo "::warning::github_token not provided; cannot read this PR's commit SHAs, so preview ownership can't be verified. Skipping cleanup."
+          exit 0
+        fi
+
+        # This PR's commit SHAs form the ownership set: a preview is only deleted
+        # if its previewGitRef is one of these commits.
+        PR_SHAS="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/commits" --paginate --jq '.[].sha' 2>/dev/null || true)"
+        if [ -z "$PR_SHAS" ]; then
+          echo "::warning::Could not fetch commits for PR #${PR_NUMBER}; skipping cleanup."
+          exit 0
+        fi
+
+        MODULES_JSON="$(raptor get iac-module -o json 2>/dev/null || echo '[]')"
+
+        meta() {
+          sed -n -E "s/^$2:[[:space:]]*(.*)$/\1/p" "$1/facets.yaml" | head -n1 \
+            | sed -E "s/[[:space:]]*#.*$//; s/^[\"']//; s/[\"'][[:space:]]*$//; s/[[:space:]]*$//"
+        }
+
+        # shellcheck disable=SC2086,SC2154  # $dirs is an intentional space-separated list injected via $GITHUB_ENV
+        for dir in $dirs; do
+          echo "::group::Cleanup ${dir}"
+          TYPE="$(meta "$dir" intent)"; FLAVOR="$(meta "$dir" flavor)"; VERSION="$(meta "$dir" version)"
+          if [ -z "$TYPE" ] || [ -z "$FLAVOR" ] || [ -z "$VERSION" ]; then
+            echo "::warning::Could not read intent/flavor/version from ${dir}/facets.yaml; skipping."
+            echo "::endgroup::"; continue
+          fi
+          REF="${TYPE}/${FLAVOR}/${VERSION}"
+
+          PREVIEW_REF="$(printf '%s' "$MODULES_JSON" | jq -r \
+            --arg t "$TYPE" --arg f "$FLAVOR" --arg v "$VERSION" \
+            'map(select(.intent==$t and .flavor==$f and .version==$v)) | (.[0].previewGitRef // "")' 2>/dev/null || true)"
+          if [ -z "$PREVIEW_REF" ] || [ "$PREVIEW_REF" = "null" ]; then
+            echo "No preview slot / previewGitRef recorded for ${REF}; nothing to clean up."
+            echo "::endgroup::"; continue
+          fi
+
+          OWNED="false"
+          while IFS= read -r sha; do
+            [ -z "$sha" ] && continue
+            if [ "$sha" = "$PREVIEW_REF" ]; then OWNED="true"; break; fi
+          done <<< "$PR_SHAS"
+
+          if [ "$OWNED" != "true" ]; then
+            echo "Preview for ${REF} is owned by another branch (previewGitRef=${PREVIEW_REF}); leaving it untouched."
+            echo "::endgroup::"; continue
+          fi
+
+          echo "Deleting preview for ${REF} (owned by this PR, previewGitRef=${PREVIEW_REF})..."
+          if ! raptor delete iac-module "$REF" --yes --force; then
+            echo "::error::Failed to delete preview for ${REF}"
+            echo "${REF} (cleanup)" >> "$FAILURES"
+          fi
+          echo "::endgroup::"
+        done
+
+    - name: Report summary and gate
+      if: always()
+      shell: bash
+      run: |
+        set -uo pipefail
+        FAILURES="${RUNNER_TEMP}/ci_failures"
+        echo "=== Facets Module CI summary (mode: ${MODE:-unknown}) ==="
+        if [ -f "$FAILURES" ] && [ -s "$FAILURES" ]; then
+          echo "The following modules failed:"
+          sed 's/^/  - /' "$FAILURES"
+          exit 1
+        fi
+        echo "All processed modules succeeded (or there was nothing to do)."
