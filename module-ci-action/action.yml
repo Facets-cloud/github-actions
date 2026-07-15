@@ -24,6 +24,14 @@ inputs:
     description: "Exact URL to download the raptor linux-amd64 binary from, bypassing the default Facets-cloud/raptor-releases location. When set, raptor_version is ignored. Escape hatch for testing/pre-release builds and enterprise mirrors."
     required: false
     default: ""
+  terraform-version:
+    description: "Terraform version to install for raptor's module validation (terraform fmt/validate). Downloaded from releases.hashicorp.com. Not installed in cleanup mode."
+    required: false
+    default: "1.5.7"
+  trivy-version:
+    description: "Trivy version to install for raptor's module security scan. Downloaded from github.com/aquasecurity/trivy releases (no 'v' prefix). Not installed in cleanup mode."
+    required: false
+    default: "0.72.0"
   all-modules:
     description: "When 'true', operate on every module under <path-prefix>modules/ instead of only the ones changed by the triggering event."
     required: false
@@ -105,6 +113,37 @@ runs:
         esac
         echo "Resolved mode: ${MODE} (event=${EVENT_NAME}, action=${EVENT_ACTION:-none})"
         echo "MODE=${MODE}" >> "$GITHUB_ENV"
+
+    - name: Install Terraform and Trivy
+      # Only preview/publish run raptor's module validation, which shells out to
+      # terraform and trivy. Cleanup deletes previews and needs neither.
+      if: env.MODE != 'cleanup'
+      shell: bash
+      env:
+        TERRAFORM_VERSION: ${{ inputs.terraform-version }}
+        TRIVY_VERSION: ${{ inputs.trivy-version }}
+      run: |
+        set -euo pipefail
+
+        # Terraform — raptor's module validation runs `terraform fmt`/`validate`,
+        # and ubuntu-latest runners ship no terraform (raptor hard-fails without it).
+        echo "Installing Terraform ${TERRAFORM_VERSION}..."
+        TF_ZIP="terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+        curl -fsSL -o "$TF_ZIP" "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/${TF_ZIP}"
+        unzip -o "$TF_ZIP" terraform
+        sudo mv terraform /usr/local/bin/terraform
+        rm -f "$TF_ZIP"
+        terraform version
+
+        # Trivy — raptor's security scan uses it. Without it raptor only warns, but
+        # we want the scan enforced in CI.
+        echo "Installing Trivy ${TRIVY_VERSION}..."
+        TRIVY_TGZ="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+        curl -fsSL -o "$TRIVY_TGZ" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${TRIVY_TGZ}"
+        tar -xzf "$TRIVY_TGZ" trivy
+        sudo mv trivy /usr/local/bin/trivy
+        rm -f "$TRIVY_TGZ"
+        trivy --version
 
     - name: Detect target module directories
       shell: bash

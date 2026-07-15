@@ -40,7 +40,9 @@ modules live at `infra/modules/...`).
 
 ## Requirements
 
-- **Runner:** Ubuntu (the action installs a Linux amd64 `raptor` binary).
+- **Runner:** Ubuntu (the action installs Linux amd64 `raptor`, and — for preview/publish
+  — `terraform` and `trivy`, which raptor's module validation and security scan require;
+  ubuntu-latest ships none of them). Versions are pinnable via the inputs below.
 - **raptor version:** preview and cleanup depend on newer `raptor` capabilities:
   - **preview** uses `raptor create iac-module --feature-branch`, a flag that marks a
     preview as **unpublishable**.
@@ -65,6 +67,8 @@ modules live at `infra/modules/...`).
 | `github_token` | no | `""` | GitHub token. Enables the PR **preview comment** and, in **cleanup**, reading the PR's commit SHAs for the ownership check. When absent, those are skipped (cleanup does nothing, safely). |
 | `raptor_version` | no | `latest` | `latest`, or an exact release tag such as `v1.2.3`. Ignored when `raptor-download-url` is set. |
 | `raptor-download-url` | no | `""` | Exact URL to download the raptor `linux-amd64` binary from, bypassing the default `Facets-cloud/raptor-releases` location. When set, `raptor_version` is ignored. An escape hatch for testing / pre-release raptor builds and enterprise mirrors. |
+| `terraform-version` | no | `1.5.7` | Terraform version installed (from `releases.hashicorp.com`) for raptor's module validation. Not installed in **cleanup** mode. |
+| `trivy-version` | no | `0.72.0` | Trivy version installed (from `aquasecurity/trivy` releases, no `v` prefix) for raptor's module security scan. Not installed in **cleanup** mode. |
 | `all-modules` | no | `false` | When `true`, operate on **every** module under `<path-prefix>modules/` instead of only the ones the event changed. |
 | `mode` | no | `auto` | `auto` \| `preview` \| `publish` \| `cleanup`. `auto` derives the mode from the event (see the table above). Set explicitly to override. |
 | `path-prefix` | no | `""` | Sub-path to the `modules/` tree relative to the repo root (e.g. `infra/`). Empty means `modules/` is at the root. |
