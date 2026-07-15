@@ -82,6 +82,7 @@ runs:
         INPUT_MODE: ${{ inputs.mode }}
         EVENT_NAME: ${{ github.event_name }}
         EVENT_ACTION: ${{ github.event.action }}
+        PR_MERGED: ${{ github.event.pull_request.merged }}
       run: |
         set -euo pipefail
         # raptor reads these three env vars directly and treats them as the
@@ -111,13 +112,25 @@ runs:
           preview|publish|cleanup) ;;
           *) echo "::error::Invalid mode '${MODE}' (expected auto|preview|publish|cleanup)."; exit 1 ;;
         esac
+
+        # On a MERGED pull_request close, the concurrent push (publish) run
+        # re-uploads and publishes the preview at the merge commit, consuming the
+        # slot. Cleanup would then be redundant AND racy: its ownership check reads
+        # the old PR-head SHA while its delete resolves later, so a bad interleaving
+        # could delete the merge-SHA preview the publish run just created and kill
+        # the publish. Only clean up PRs closed WITHOUT merging.
+        if [ "$MODE" = "cleanup" ] && [ "$PR_MERGED" = "true" ]; then
+          echo "PR merged — the publish run owns the preview slot; nothing to clean."
+          MODE="noop"
+        fi
+
         echo "Resolved mode: ${MODE} (event=${EVENT_NAME}, action=${EVENT_ACTION:-none})"
         echo "MODE=${MODE}" >> "$GITHUB_ENV"
 
     - name: Install Terraform and Trivy
       # Only preview/publish run raptor's module validation, which shells out to
-      # terraform and trivy. Cleanup deletes previews and needs neither.
-      if: env.MODE != 'cleanup'
+      # terraform and trivy. Cleanup (and the merged-PR no-op) need neither.
+      if: env.MODE == 'preview' || env.MODE == 'publish'
       shell: bash
       env:
         TERRAFORM_VERSION: ${{ inputs.terraform-version }}

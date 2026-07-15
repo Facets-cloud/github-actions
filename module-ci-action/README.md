@@ -11,7 +11,8 @@ triggering event:
 |-------|------|--------------|
 | `pull_request` opened / synchronize / reopened | **preview** | Validates each changed module, then registers a **feature-branch preview** pinned to the PR head commit. Optionally upserts a PR comment. |
 | `push` (to your default branch) | **publish** | Uploads each changed module and **publishes** it (PREVIEW → PUBLISHED). |
-| `pull_request` **closed** | **cleanup** | Deletes the preview each changed module owns — **only if** the preview belongs to a commit from this PR. |
+| `pull_request` **closed without merge** | **cleanup** | Deletes the preview each changed module owns — **only if** the preview belongs to a commit from this PR. |
+| `pull_request` **closed by merge** | **no-op** | Skipped: the concurrent `push` (publish) run re-uploads and publishes the module at the merge commit, so it owns the slot. Running cleanup here would be redundant and could race the publish. |
 
 > This action is a sibling of [`module-preview-action`](../module-preview-action)
 > (the `ftf`-based action). They are independent — pick the one that matches your CLI.
@@ -132,7 +133,11 @@ Plane. When a PR previews a module, the action registers the preview against the
 
 - **Concurrent PRs on the same module:** last write wins. Whichever PR most recently
   ran preview owns the slot; an earlier PR's preview is overwritten.
-- **Cleanup is ownership-checked.** On PR close, the action reads each module's owning
+- **Merged PRs skip cleanup.** When a PR is closed **by merging**, the concurrent `push`
+  run publishes the module at the merge commit and owns the slot, so cleanup is skipped
+  entirely (it would be redundant and could race the publish). Cleanup runs only for PRs
+  **closed without merging** (abandoned PRs), where the preview would otherwise be orphaned.
+- **Cleanup is ownership-checked.** On such a close, the action reads each module's owning
   commit from `raptor get iac-module -o json` and deletes the preview **only if** that
   commit is one of this PR's commit SHAs. If the slot was taken over by another branch,
   this PR leaves it untouched — it never deletes a preview owned by someone else.
