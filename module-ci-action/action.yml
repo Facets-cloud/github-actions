@@ -381,7 +381,11 @@ runs:
           fi
 
           echo "Deleting preview for ${REF} (owned by this PR, owning commit=${OWNER_SHA})..."
-          if ! raptor delete iac-module "$REF" --yes --force; then
+          # --stage PREVIEW targets ONLY the preview doc; without it a REF that has
+          # both a published and a preview doc would delete the live published
+          # module. Keep the usage guard (no --force) so a genuinely in-use preview
+          # surfaces as a real error rather than being force-deleted.
+          if ! raptor delete iac-module "$REF" --stage PREVIEW --yes; then
             echo "::error::Failed to delete preview for ${REF}"
             echo "${REF} (cleanup)" >> "$FAILURES"
           fi

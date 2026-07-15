@@ -41,13 +41,19 @@ modules live at `infra/modules/...`).
 ## Requirements
 
 - **Runner:** Ubuntu (the action installs a Linux amd64 `raptor` binary).
-- **raptor version:** the **preview** mode uses `raptor create iac-module --feature-branch`,
-  a flag that marks a preview as **unpublishable**. It is newer than the base
-  `iac-module` commands, so preview mode requires a `raptor` release that ships
-  `--feature-branch` and surfaces module git provenance (`gitRef` / `previewGitRef`) in
-  `raptor get iac-module -o json`, which cleanup's ownership check reads. Pin
-  `raptor_version` accordingly if `latest` ever lags. Publish works on any recent
-  `raptor`; cleanup safely no-ops when those provenance fields are absent.
+- **raptor version:** preview and cleanup depend on newer `raptor` capabilities:
+  - **preview** uses `raptor create iac-module --feature-branch`, a flag that marks a
+    preview as **unpublishable**.
+  - **cleanup** reads module git provenance (`gitRef` / `previewGitRef`) from
+    `raptor get iac-module -o json` for its ownership check, and deletes with
+    `raptor delete iac-module --stage PREVIEW`, which targets **only** the preview doc
+    (so a module that has both a published and a preview version never loses its live
+    published doc).
+
+  These require a `raptor` release that ships all three (`--feature-branch`, row-level
+  provenance in the list JSON, and `delete --stage`). Pin `raptor_version` if `latest`
+  ever lags. Publish works on any recent `raptor`; cleanup safely no-ops when the
+  provenance fields are absent.
 
 ## Inputs
 
