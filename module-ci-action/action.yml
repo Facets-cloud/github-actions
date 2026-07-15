@@ -322,7 +322,7 @@ runs:
         fi
 
         # This PR's commit SHAs form the ownership set: a preview is only deleted
-        # if its previewGitRef is one of these commits.
+        # if the commit that created it is one of these commits.
         PR_SHAS="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/commits" --paginate --jq '.[].sha' 2>/dev/null || true)"
         if [ -z "$PR_SHAS" ]; then
           echo "::warning::Could not fetch commits for PR #${PR_NUMBER}; skipping cleanup."
@@ -346,26 +346,41 @@ runs:
           fi
           REF="${TYPE}/${FLAVOR}/${VERSION}"
 
-          PREVIEW_REF="$(printf '%s' "$MODULES_JSON" | jq -r \
-            --arg t "$TYPE" --arg f "$FLAVOR" --arg v "$VERSION" \
-            'map(select(.intent==$t and .flavor==$f and .version==$v)) | (.[0].previewGitRef // "")' 2>/dev/null || true)"
-          if [ -z "$PREVIEW_REF" ] || [ "$PREVIEW_REF" = "null" ]; then
-            echo "No preview slot / previewGitRef recorded for ${REF}; nothing to clean up."
+          # Find the commit that owns this module's preview slot. The provenance
+          # field depends on the module's stage in the list:
+          #   - a brand-new, never-published module IS the preview (stage PREVIEW);
+          #     its owning commit is the row's own .gitRef.
+          #   - a PUBLISHED module with a preview sibling (.previewModuleId set)
+          #     exposes the preview's commit as .previewGitRef.
+          #   - anything else has no preview slot -> skip.
+          # Prefer a PREVIEW row when both exist (its .gitRef is the preview's own
+          # provenance). Absent/older fields yield "" and are treated as "no slot".
+          OWNER_SHA="$(printf '%s' "$MODULES_JSON" | jq -r \
+            --arg t "$TYPE" --arg f "$FLAVOR" --arg v "$VERSION" '
+              map(select(.intent==$t and .flavor==$f and .version==$v)) as $rows
+              | ($rows | map(select(.stage=="PREVIEW"))[0]) as $preview
+              | ($rows | map(select(.stage=="PUBLISHED" and ((.previewModuleId // "") != "")))[0]) as $published
+              | if $preview then ($preview.gitRef // "")
+                elif $published then ($published.previewGitRef // "")
+                else "" end
+            ' 2>/dev/null || true)"
+          if [ -z "$OWNER_SHA" ] || [ "$OWNER_SHA" = "null" ]; then
+            echo "No preview slot recorded for ${REF}; nothing to clean up."
             echo "::endgroup::"; continue
           fi
 
           OWNED="false"
           while IFS= read -r sha; do
             [ -z "$sha" ] && continue
-            if [ "$sha" = "$PREVIEW_REF" ]; then OWNED="true"; break; fi
+            if [ "$sha" = "$OWNER_SHA" ]; then OWNED="true"; break; fi
           done <<< "$PR_SHAS"
 
           if [ "$OWNED" != "true" ]; then
-            echo "Preview for ${REF} is owned by another branch (previewGitRef=${PREVIEW_REF}); leaving it untouched."
+            echo "Preview for ${REF} is owned by another branch (owning commit=${OWNER_SHA}); leaving it untouched."
             echo "::endgroup::"; continue
           fi
 
-          echo "Deleting preview for ${REF} (owned by this PR, previewGitRef=${PREVIEW_REF})..."
+          echo "Deleting preview for ${REF} (owned by this PR, owning commit=${OWNER_SHA})..."
           if ! raptor delete iac-module "$REF" --yes --force; then
             echo "::error::Failed to delete preview for ${REF}"
             echo "${REF} (cleanup)" >> "$FAILURES"
