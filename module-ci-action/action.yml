@@ -17,9 +17,13 @@ inputs:
     required: false
     default: ""
   raptor_version:
-    description: "raptor CLI version to install: 'latest' or an exact release tag (e.g. v1.2.3)."
+    description: "raptor CLI version to install: 'latest' or an exact release tag (e.g. v1.2.3). Ignored when raptor-download-url is set."
     required: false
     default: "latest"
+  raptor-download-url:
+    description: "Exact URL to download the raptor linux-amd64 binary from, bypassing the default Facets-cloud/raptor-releases location. When set, raptor_version is ignored. Escape hatch for testing/pre-release builds and enterprise mirrors."
+    required: false
+    default: ""
   all-modules:
     description: "When 'true', operate on every module under <path-prefix>modules/ instead of only the ones changed by the triggering event."
     required: false
@@ -46,7 +50,11 @@ runs:
       run: |
         set -euo pipefail
         VERSION="${{ inputs.raptor_version }}"
-        if [ -z "$VERSION" ] || [ "$VERSION" = "latest" ]; then
+        DOWNLOAD_URL="${{ inputs.raptor-download-url }}"
+        if [ -n "$DOWNLOAD_URL" ]; then
+          # Explicit override: fetch the binary from exactly this URL (raptor_version ignored).
+          URL="$DOWNLOAD_URL"
+        elif [ -z "$VERSION" ] || [ "$VERSION" = "latest" ]; then
           URL="https://github.com/Facets-cloud/raptor-releases/releases/latest/download/raptor-linux-amd64"
         else
           URL="https://github.com/Facets-cloud/raptor-releases/releases/download/${VERSION}/raptor-linux-amd64"

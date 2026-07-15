@@ -63,7 +63,8 @@ modules live at `infra/modules/...`).
 | `username` | yes | — | Facets username. Pass the `FACETS_USERNAME` secret. |
 | `token` | yes | — | Facets API token. Pass the `FACETS_TOKEN` secret. |
 | `github_token` | no | `""` | GitHub token. Enables the PR **preview comment** and, in **cleanup**, reading the PR's commit SHAs for the ownership check. When absent, those are skipped (cleanup does nothing, safely). |
-| `raptor_version` | no | `latest` | `latest`, or an exact release tag such as `v1.2.3`. |
+| `raptor_version` | no | `latest` | `latest`, or an exact release tag such as `v1.2.3`. Ignored when `raptor-download-url` is set. |
+| `raptor-download-url` | no | `""` | Exact URL to download the raptor `linux-amd64` binary from, bypassing the default `Facets-cloud/raptor-releases` location. When set, `raptor_version` is ignored. An escape hatch for testing / pre-release raptor builds and enterprise mirrors. |
 | `all-modules` | no | `false` | When `true`, operate on **every** module under `<path-prefix>modules/` instead of only the ones the event changed. |
 | `mode` | no | `auto` | `auto` \| `preview` \| `publish` \| `cleanup`. `auto` derives the mode from the event (see the table above). Set explicitly to override. |
 | `path-prefix` | no | `""` | Sub-path to the `modules/` tree relative to the repo root (e.g. `infra/`). Empty means `modules/` is at the root. |
