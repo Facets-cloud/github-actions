@@ -14,8 +14,9 @@ triggering event:
 | `pull_request` **closed without merge** | **cleanup** | Deletes the preview each changed module owns — **only if** the preview belongs to a commit from this PR. |
 | `pull_request` **closed by merge** | **no-op** | Skipped: the concurrent `push` (publish) run re-uploads and publishes the module at the merge commit, so it owns the slot. Running cleanup here would be redundant and could race the publish. |
 
-> This action is a sibling of [`module-preview-action`](../module-preview-action)
-> (the `ftf`-based action). They are independent — pick the one that matches your CLI.
+> This action supersedes the **deprecated** `ftf`-based
+> [`module-preview-action`](../module-preview-action), which is kept only for
+> existing workflows.
 
 ## Modules-repo layout
 
@@ -117,7 +118,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Facets Module CI
-        uses: Facets-cloud/github-actions/module-ci-action@master
+        uses: Facets-cloud/github-actions/module-ci-action@v1
         with:
           control_plane_url: ${{ secrets.CONTROL_PLANE_URL }}
           username: ${{ secrets.FACETS_USERNAME }}
@@ -129,6 +130,19 @@ jobs:
 
 If you prefer separate workflow files, split the three triggers apart and let `mode`
 stay `auto`; the action derives `preview` / `publish` / `cleanup` from each event.
+
+## Versioning
+
+Reference this action by version, not by branch:
+
+- **`@v1`** — the moving major alias; always points at the latest `v1.x.y` release.
+  This is what the control plane's bootstrapped workflow uses and the right default.
+- **`@v1.2.3`** — an exact release, if you need to pin harder.
+
+Releases are cut by pushing a semver tag (`git tag v1.2.0 && git push origin v1.2.0`);
+the repo's `release.yml` workflow then moves the major alias and publishes the GitHub
+release. Breaking changes to the action's inputs or behavior get a new major
+(`v2`, with a `v2` alias) — the `v1` alias never picks them up.
 
 ## Single-preview-slot semantics
 
