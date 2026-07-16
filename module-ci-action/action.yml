@@ -73,34 +73,30 @@ runs:
         sudo mv raptor /usr/local/bin/raptor
         raptor version 2>/dev/null || raptor --version 2>/dev/null || true
 
-    - name: Configure raptor auth and resolve mode
+    - name: Resolve CI mode
       shell: bash
       env:
-        CP_URL: ${{ inputs.control_plane_url }}
-        CP_USER: ${{ inputs.username }}
-        CP_TOKEN: ${{ inputs.token }}
         INPUT_MODE: ${{ inputs.mode }}
         EVENT_NAME: ${{ github.event_name }}
         EVENT_ACTION: ${{ github.event.action }}
         PR_MERGED: ${{ github.event.pull_request.merged }}
       run: |
         set -euo pipefail
-        # raptor reads these three env vars directly and treats them as the
-        # highest-priority auth. There is no non-interactive `raptor login`.
-        {
-          echo "CONTROL_PLANE_URL=${CP_URL}"
-          echo "FACETS_USERNAME=${CP_USER}"
-          echo "FACETS_TOKEN=${CP_TOKEN}"
-        } >> "$GITHUB_ENV"
-
+        # NOTE: raptor auth (CONTROL_PLANE_URL / FACETS_USERNAME / FACETS_TOKEN) is
+        # NOT exported here. It is set as a step-scoped env: block on each step that
+        # invokes raptor, so the token never leaks into other steps of the caller's job.
         MODE="${INPUT_MODE:-auto}"
         if [ "$MODE" = "auto" ] || [ -z "$MODE" ]; then
           case "$EVENT_NAME" in
-            pull_request|pull_request_target)
+            pull_request)
               if [ "$EVENT_ACTION" = "closed" ]; then MODE="cleanup"; else MODE="preview"; fi
               ;;
             push)
               MODE="publish"
+              ;;
+            pull_request_target)
+              echo "::error::pull_request_target is not supported — it checks out the BASE ref, so the changed-file diff is empty and git provenance is wrong. Use a 'pull_request' trigger instead."
+              exit 1
               ;;
             *)
               echo "::error::Cannot derive mode from event '${EVENT_NAME}'. Set the 'mode' input explicitly (preview|publish|cleanup)."
@@ -185,25 +181,49 @@ runs:
 
         changed_files() {
           if [ "$EVENT_NAME" = "push" ]; then
-            if [ -z "$PUSH_BEFORE" ] || [ "$PUSH_BEFORE" = "0000000000000000000000000000000000000000" ]; then
-              # New branch or first push: the before-SHA is all zeros, so diff the
-              # pushed commit against its parent(s) instead.
+            # Fall back to the pushed commit's own diff-tree when the before-SHA is
+            # absent, all-zeros (new branch), or unreachable (force-push / rebase) —
+            # otherwise `git diff` errors and every module is silently skipped.
+            if [ -z "$PUSH_BEFORE" ] || [ "$PUSH_BEFORE" = "0000000000000000000000000000000000000000" ] \
+               || ! git rev-parse --verify --quiet "${PUSH_BEFORE}^{commit}" >/dev/null 2>&1; then
               git diff-tree --no-commit-id --name-only -r "$PUSH_AFTER"
             else
               git diff --name-only "${PUSH_BEFORE}..${PUSH_AFTER}"
             fi
           else
-            # pull_request / pull_request_target: base..HEAD. HEAD is the checkout
-            # merge commit; the three-dot form diffs against the merge base.
+            # pull_request: base..HEAD. HEAD is the checkout merge commit; the
+            # three-dot form diffs against the merge base.
             git diff --name-only "${PR_BASE_SHA}...HEAD"
           fi
+        }
+
+        # Map a changed file to the nearest ANCESTOR directory that holds a
+        # facets.yaml, so a change inside modules/x/y/1.0/templates/foo.tpl still
+        # maps to modules/x/y/1.0 (immediate-dirname mapping would drop it and ship
+        # the module unvalidated). Bounded by the repo root; empty when none found.
+        find_module_dir() {
+          local d
+          d="$(dirname "$1")"
+          while [ -n "$d" ] && [ "$d" != "." ] && [ "$d" != "/" ]; do
+            if [ -f "$d/facets.yaml" ]; then
+              printf '%s\n' "$d"
+              return 0
+            fi
+            d="$(dirname "$d")"
+          done
+          if [ -f "facets.yaml" ]; then printf '%s\n' "."; fi
         }
 
         if [ "$ALL_MODULES" = "true" ]; then
           echo "all-modules=true: scanning ${MODULES_ROOT} for every facets.yaml"
           CANDIDATES="$(collect_all || true)"
         else
-          CANDIDATES="$(changed_files | xargs -r -I{} dirname {} | sort -u || true)"
+          CANDIDATES=""
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            md="$(find_module_dir "$f" || true)"
+            [ -n "$md" ] && CANDIDATES="${CANDIDATES} ${md}"
+          done <<< "$(changed_files || true)"
         fi
 
         DIRS=""
@@ -232,6 +252,9 @@ runs:
       if: env.MODE == 'preview' && env.dirs != ''
       shell: bash
       env:
+        CONTROL_PLANE_URL: ${{ inputs.control_plane_url }}
+        FACETS_USERNAME: ${{ inputs.username }}
+        FACETS_TOKEN: ${{ inputs.token }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
         set -uo pipefail
@@ -325,6 +348,10 @@ runs:
     - name: Publish modules (push)
       if: env.MODE == 'publish' && env.dirs != ''
       shell: bash
+      env:
+        CONTROL_PLANE_URL: ${{ inputs.control_plane_url }}
+        FACETS_USERNAME: ${{ inputs.username }}
+        FACETS_TOKEN: ${{ inputs.token }}
       run: |
         set -uo pipefail
         FAILURES="${RUNNER_TEMP}/ci_failures"
@@ -368,6 +395,9 @@ runs:
       if: env.MODE == 'cleanup' && env.dirs != ''
       shell: bash
       env:
+        CONTROL_PLANE_URL: ${{ inputs.control_plane_url }}
+        FACETS_USERNAME: ${{ inputs.username }}
+        FACETS_TOKEN: ${{ inputs.token }}
         GH_TOKEN: ${{ inputs.github_token }}
         HAS_TOKEN: ${{ inputs.github_token != '' }}
         REPO: ${{ github.repository }}
@@ -389,11 +419,44 @@ runs:
           exit 0
         fi
 
-        MODULES_JSON="$(raptor get iac-module -o json 2>/dev/null || echo '[]')"
+        # List once up front for ownership context. Distinguish a genuine list
+        # failure from an empty result, so a failed list is not silently read as
+        # "every module has no preview slot".
+        if MODULES_JSON="$(raptor get iac-module -o json 2>/dev/null)"; then
+          LIST_OK=1
+        else
+          LIST_OK=0
+          MODULES_JSON='[]'
+          echo "::warning::Could not list modules (raptor get iac-module failed); cleanup will skip every module."
+        fi
 
         meta() {
           sed -n -E "s/^$2:[[:space:]]*(.*)$/\1/p" "$1/facets.yaml" | head -n1 \
             | sed -E "s/[[:space:]]*#.*$//; s/^[\"']//; s/[\"'][[:space:]]*$//; s/[[:space:]]*$//"
+        }
+
+        # owner_sha <json> <intent> <flavor> <version> -> the commit that owns the
+        # module's preview slot, resolved by stage: a PREVIEW row's own .gitRef,
+        # else a PUBLISHED row's .previewGitRef when it has a preview sibling
+        # (.previewModuleId). Tolerant of a non-array payload; empty when there is
+        # no preview slot or the list JSON carries no provenance.
+        owner_sha() {
+          printf '%s' "$1" | jq -r --arg t "$2" --arg f "$3" --arg v "$4" '
+            (if type=="array" then . else [] end)
+            | map(select(.intent==$t and .flavor==$f and .version==$v)) as $rows
+            | ($rows | map(select(.stage=="PREVIEW"))[0]) as $preview
+            | ($rows | map(select(.stage=="PUBLISHED" and ((.previewModuleId // "") != "")))[0]) as $published
+            | if $preview then ($preview.gitRef // "")
+              elif $published then ($published.previewGitRef // "")
+              else "" end
+          ' 2>/dev/null || true
+        }
+
+        # module_rows <json> <intent> <flavor> <version> -> count of matching rows.
+        module_rows() {
+          printf '%s' "$1" | jq -r --arg t "$2" --arg f "$3" --arg v "$4" \
+            '(if type=="array" then . else [] end) | map(select(.intent==$t and .flavor==$f and .version==$v)) | length' \
+            2>/dev/null || echo 0
         }
 
         # shellcheck disable=SC2086,SC2154  # $dirs is an intentional space-separated list injected via $GITHUB_ENV
@@ -406,26 +469,15 @@ runs:
           fi
           REF="${TYPE}/${FLAVOR}/${VERSION}"
 
-          # Find the commit that owns this module's preview slot. The provenance
-          # field depends on the module's stage in the list:
-          #   - a brand-new, never-published module IS the preview (stage PREVIEW);
-          #     its owning commit is the row's own .gitRef.
-          #   - a PUBLISHED module with a preview sibling (.previewModuleId set)
-          #     exposes the preview's commit as .previewGitRef.
-          #   - anything else has no preview slot -> skip.
-          # Prefer a PREVIEW row when both exist (its .gitRef is the preview's own
-          # provenance). Absent/older fields yield "" and are treated as "no slot".
-          OWNER_SHA="$(printf '%s' "$MODULES_JSON" | jq -r \
-            --arg t "$TYPE" --arg f "$FLAVOR" --arg v "$VERSION" '
-              map(select(.intent==$t and .flavor==$f and .version==$v)) as $rows
-              | ($rows | map(select(.stage=="PREVIEW"))[0]) as $preview
-              | ($rows | map(select(.stage=="PUBLISHED" and ((.previewModuleId // "") != "")))[0]) as $published
-              | if $preview then ($preview.gitRef // "")
-                elif $published then ($published.previewGitRef // "")
-                else "" end
-            ' 2>/dev/null || true)"
+          OWNER_SHA="$(owner_sha "$MODULES_JSON" "$TYPE" "$FLAVOR" "$VERSION")"
           if [ -z "$OWNER_SHA" ] || [ "$OWNER_SHA" = "null" ]; then
-            echo "No preview slot recorded for ${REF}; nothing to clean up."
+            # The list succeeded and the module IS present, yet no owning commit
+            # resolved — surface it rather than silently claiming "no preview slot".
+            if [ "$LIST_OK" = "1" ] && [ "$(module_rows "$MODULES_JSON" "$TYPE" "$FLAVOR" "$VERSION")" != "0" ]; then
+              echo "::warning::${REF} is in the registry but no owning commit could be resolved (no preview slot, or the list JSON lacks provenance fields); skipping."
+            else
+              echo "No preview slot recorded for ${REF}; nothing to clean up."
+            fi
             echo "::endgroup::"; continue
           fi
 
@@ -437,6 +489,16 @@ runs:
 
           if [ "$OWNED" != "true" ]; then
             echo "Preview for ${REF} is owned by another branch (owning commit=${OWNER_SHA}); leaving it untouched."
+            echo "::endgroup::"; continue
+          fi
+
+          # TOCTOU guard: the snapshot above may be stale (a concurrent run could
+          # have overwritten this slot). Re-fetch and re-verify the owning commit
+          # is still the one we validated as owned before deleting. A residual race
+          # remains between this re-check and the delete itself — see the README.
+          FRESH_SHA="$(owner_sha "$(raptor get iac-module -o json 2>/dev/null || echo '[]')" "$TYPE" "$FLAVOR" "$VERSION")"
+          if [ "$FRESH_SHA" != "$OWNER_SHA" ]; then
+            echo "::warning::Preview slot for ${REF} changed between the ownership check and delete (was ${OWNER_SHA}, now ${FRESH_SHA:-none}); skipping to avoid deleting a preview this PR no longer owns."
             echo "::endgroup::"; continue
           fi
 

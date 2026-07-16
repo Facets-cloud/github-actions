@@ -45,18 +45,23 @@ modules live at `infra/modules/...`).
   — `terraform` and `trivy`, which raptor's module validation and security scan require;
   ubuntu-latest ships none of them). Versions are pinnable via the inputs below.
 - **raptor version:** preview and cleanup depend on newer `raptor` capabilities:
-  - **preview** uses `raptor create iac-module --feature-branch`, a flag that marks a
-    preview as **unpublishable**.
+  - **preview** uses `raptor create iac-module --feature-branch --git-ref <sha>` — the
+    `--feature-branch` flag marks the preview **unpublishable**, and `--git-ref` pins it
+    to the PR head commit (required, since the PR checkout is a merge commit). Both must
+    be present in the `raptor` release you install.
   - **cleanup** reads module git provenance (`gitRef` / `previewGitRef`) from
     `raptor get iac-module -o json` for its ownership check, and deletes with
     `raptor delete iac-module --stage PREVIEW`, which targets **only** the preview doc
     (so a module that has both a published and a preview version never loses its live
     published doc).
 
-  These require a `raptor` release that ships all three (`--feature-branch`, row-level
-  provenance in the list JSON, and `delete --stage`). Pin `raptor_version` if `latest`
-  ever lags. Publish works on any recent `raptor`; cleanup safely no-ops when the
+  These require a `raptor` release that ships all of them (`--feature-branch`, `--git-ref`,
+  row-level provenance in the list JSON, and `delete --stage`). Pin `raptor_version` if
+  `latest` ever lags. Publish works on any recent `raptor`; cleanup safely no-ops when the
   provenance fields are absent.
+- **Trigger:** use `pull_request` (not `pull_request_target`). `pull_request_target`
+  checks out the base ref, which would produce an empty changed-file diff and incorrect
+  git provenance; the action rejects it with an explicit error.
 
 ## Inputs
 
@@ -142,6 +147,11 @@ Plane. When a PR previews a module, the action registers the preview against the
   commit is one of this PR's commit SHAs. If the slot was taken over by another branch,
   this PR leaves it untouched — it never deletes a preview owned by someone else.
   (Cleanup needs `github_token` to read the PR's commits; without it, cleanup is skipped.)
+  Immediately before deleting, the action re-fetches the module and re-verifies the owning
+  commit still matches, so a slot overwritten between the initial check and the delete is
+  skipped. This narrows but does not fully eliminate the window: a **residual race**
+  remains between that final re-verify and the delete call itself, so in a rare
+  interleaving a preview another branch published in that instant could still be removed.
 
   The owning-commit field depends on the module's stage, because the Control Plane
   stores preview provenance in two different places:
