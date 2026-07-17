@@ -1,0 +1,53 @@
+name: "Release"
+
+# Versioning for the actions in this repo (they are consumed as
+# Facets-cloud/github-actions/<action>@<ref>):
+#
+#   - Exact releases are annotated semver tags: v1.0.0, v1.1.0, ...
+#   - Each major has a MOVING alias tag (v1, v2, ...) that always points at the
+#     latest release of that major — the same convention as actions/checkout.
+#     Consumers (including the workflow the control plane bootstraps into
+#     customer repos) pin the alias: module-ci-action@v1.
+#
+# Pushing a semver tag runs this workflow, which force-moves the major alias
+# to the new tag and creates a GitHub release for it. To cut a release:
+#
+#   git tag v1.2.0 && git push origin v1.2.0
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Move the major alias tag
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          MAJOR="${TAG%%.*}"   # v1.2.3 -> v1
+          echo "Pointing ${MAJOR} at ${TAG}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f -a "${MAJOR}" -m "Point ${MAJOR} at ${TAG}" "${TAG}^{}"
+          git push origin "${MAJOR}" --force
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists; skipping."
+          else
+            gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+              --title "${TAG}" --generate-notes
+          fi

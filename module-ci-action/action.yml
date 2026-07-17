@@ -1,0 +1,529 @@
+name: "Facets Module CI"
+description: "CI for a Facets modules repo (modules/{intent}/{flavor}/{version}): preview on PR, publish on push, cleanup on PR close — driven by the raptor CLI."
+author: "Facets"
+
+inputs:
+  control_plane_url:
+    description: "Facets Control Plane URL (provisioned as the CONTROL_PLANE_URL secret)."
+    required: true
+  username:
+    description: "Facets username (provisioned as the FACETS_USERNAME secret)."
+    required: true
+  token:
+    description: "Facets API token (provisioned as the FACETS_TOKEN secret)."
+    required: true
+  github_token:
+    description: "GitHub token. Optional; enables the PR preview comment (preview mode) and reading the PR's commit SHAs for ownership-checked cleanup (cleanup mode). When absent, those features are skipped."
+    required: false
+    default: ""
+  raptor_version:
+    description: "raptor CLI version to install: 'latest' or an exact release tag (e.g. v1.2.3). Ignored when raptor-download-url is set."
+    required: false
+    default: "latest"
+  raptor-download-url:
+    description: "Exact URL to download the raptor linux-amd64 binary from, bypassing the default Facets-cloud/raptor-releases location. When set, raptor_version is ignored. Escape hatch for testing/pre-release builds and enterprise mirrors."
+    required: false
+    default: ""
+  terraform-version:
+    description: "Terraform version to install for raptor's module validation (terraform fmt/validate). Downloaded from releases.hashicorp.com. Not installed in cleanup mode."
+    required: false
+    default: "1.5.7"
+  trivy-version:
+    description: "Trivy version to install for raptor's module security scan. Downloaded from github.com/aquasecurity/trivy releases (no 'v' prefix). Not installed in cleanup mode."
+    required: false
+    default: "0.72.0"
+  all-modules:
+    description: "When 'true', operate on every module under <path-prefix>modules/ instead of only the ones changed by the triggering event."
+    required: false
+    default: "false"
+  mode:
+    description: "One of auto|preview|publish|cleanup. 'auto' (default) derives the mode from the event: pull_request opened/synchronize/reopened -> preview; push -> publish; pull_request closed -> cleanup."
+    required: false
+    default: "auto"
+  path-prefix:
+    description: "Sub-path to the modules/ tree, relative to the repo root (e.g. 'infra/' when modules live at infra/modules/...). Empty means modules/ is at the repo root."
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+
+    - name: Install raptor CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+        VERSION="${{ inputs.raptor_version }}"
+        DOWNLOAD_URL="${{ inputs.raptor-download-url }}"
+        if [ -n "$DOWNLOAD_URL" ]; then
+          # Explicit override: fetch the binary from exactly this URL (raptor_version ignored).
+          URL="$DOWNLOAD_URL"
+        elif [ -z "$VERSION" ] || [ "$VERSION" = "latest" ]; then
+          URL="https://github.com/Facets-cloud/raptor-releases/releases/latest/download/raptor-linux-amd64"
+        else
+          URL="https://github.com/Facets-cloud/raptor-releases/releases/download/${VERSION}/raptor-linux-amd64"
+        fi
+        echo "Installing raptor from ${URL}"
+        curl -fsSL -o raptor "$URL"
+        chmod +x raptor
+        sudo mv raptor /usr/local/bin/raptor
+        raptor version 2>/dev/null || raptor --version 2>/dev/null || true
+
+    - name: Resolve CI mode
+      shell: bash
+      env:
+        INPUT_MODE: ${{ inputs.mode }}
+        EVENT_NAME: ${{ github.event_name }}
+        EVENT_ACTION: ${{ github.event.action }}
+        PR_MERGED: ${{ github.event.pull_request.merged }}
+      run: |
+        set -euo pipefail
+        # NOTE: raptor auth (CONTROL_PLANE_URL / FACETS_USERNAME / FACETS_TOKEN) is
+        # NOT exported here. It is set as a step-scoped env: block on each step that
+        # invokes raptor, so the token never leaks into other steps of the caller's job.
+        MODE="${INPUT_MODE:-auto}"
+        if [ "$MODE" = "auto" ] || [ -z "$MODE" ]; then
+          case "$EVENT_NAME" in
+            pull_request)
+              if [ "$EVENT_ACTION" = "closed" ]; then MODE="cleanup"; else MODE="preview"; fi
+              ;;
+            push)
+              MODE="publish"
+              ;;
+            pull_request_target)
+              echo "::error::pull_request_target is not supported — it checks out the BASE ref, so the changed-file diff is empty and git provenance is wrong. Use a 'pull_request' trigger instead."
+              exit 1
+              ;;
+            *)
+              echo "::error::Cannot derive mode from event '${EVENT_NAME}'. Set the 'mode' input explicitly (preview|publish|cleanup)."
+              exit 1
+              ;;
+          esac
+        fi
+        case "$MODE" in
+          preview|publish|cleanup) ;;
+          *) echo "::error::Invalid mode '${MODE}' (expected auto|preview|publish|cleanup)."; exit 1 ;;
+        esac
+
+        # On a MERGED pull_request close, the concurrent push (publish) run
+        # re-uploads and publishes the preview at the merge commit, consuming the
+        # slot. Cleanup would then be redundant AND racy: its ownership check reads
+        # the old PR-head SHA while its delete resolves later, so a bad interleaving
+        # could delete the merge-SHA preview the publish run just created and kill
+        # the publish. Only clean up PRs closed WITHOUT merging.
+        if [ "$MODE" = "cleanup" ] && [ "$PR_MERGED" = "true" ]; then
+          echo "PR merged — the publish run owns the preview slot; nothing to clean."
+          MODE="noop"
+        fi
+
+        echo "Resolved mode: ${MODE} (event=${EVENT_NAME}, action=${EVENT_ACTION:-none})"
+        echo "MODE=${MODE}" >> "$GITHUB_ENV"
+
+    - name: Install Terraform and Trivy
+      # Only preview/publish run raptor's module validation, which shells out to
+      # terraform and trivy. Cleanup (and the merged-PR no-op) need neither.
+      if: env.MODE == 'preview' || env.MODE == 'publish'
+      shell: bash
+      env:
+        TERRAFORM_VERSION: ${{ inputs.terraform-version }}
+        TRIVY_VERSION: ${{ inputs.trivy-version }}
+      run: |
+        set -euo pipefail
+
+        # Terraform — raptor's module validation runs `terraform fmt`/`validate`,
+        # and ubuntu-latest runners ship no terraform (raptor hard-fails without it).
+        echo "Installing Terraform ${TERRAFORM_VERSION}..."
+        TF_ZIP="terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+        curl -fsSL -o "$TF_ZIP" "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/${TF_ZIP}"
+        unzip -o "$TF_ZIP" terraform
+        sudo mv terraform /usr/local/bin/terraform
+        rm -f "$TF_ZIP"
+        terraform version
+
+        # Trivy — raptor's security scan uses it. Without it raptor only warns, but
+        # we want the scan enforced in CI.
+        echo "Installing Trivy ${TRIVY_VERSION}..."
+        TRIVY_TGZ="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+        curl -fsSL -o "$TRIVY_TGZ" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${TRIVY_TGZ}"
+        tar -xzf "$TRIVY_TGZ" trivy
+        sudo mv trivy /usr/local/bin/trivy
+        rm -f "$TRIVY_TGZ"
+        trivy --version
+
+    - name: Detect target module directories
+      shell: bash
+      env:
+        ALL_MODULES: ${{ inputs.all-modules }}
+        PATH_PREFIX: ${{ inputs.path-prefix }}
+        EVENT_NAME: ${{ github.event_name }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        PUSH_BEFORE: ${{ github.event.before }}
+        PUSH_AFTER: ${{ github.sha }}
+      run: |
+        set -uo pipefail
+
+        PREFIX="${PATH_PREFIX}"
+        if [ -n "$PREFIX" ] && [ "${PREFIX%/}" = "$PREFIX" ]; then
+          PREFIX="${PREFIX}/"
+        fi
+        MODULES_ROOT="${PREFIX}modules"
+        echo "Modules root: ${MODULES_ROOT}"
+
+        collect_all() {
+          if [ -d "$MODULES_ROOT" ]; then
+            find "$MODULES_ROOT" -type f -name facets.yaml -exec dirname {} \; | sort -u
+          fi
+        }
+
+        changed_files() {
+          if [ "$EVENT_NAME" = "push" ]; then
+            # Fall back to the pushed commit's own diff-tree when the before-SHA is
+            # absent, all-zeros (new branch), or unreachable (force-push / rebase) —
+            # otherwise `git diff` errors and every module is silently skipped.
+            if [ -z "$PUSH_BEFORE" ] || [ "$PUSH_BEFORE" = "0000000000000000000000000000000000000000" ] \
+               || ! git rev-parse --verify --quiet "${PUSH_BEFORE}^{commit}" >/dev/null 2>&1; then
+              git diff-tree --no-commit-id --name-only -r "$PUSH_AFTER"
+            else
+              git diff --name-only "${PUSH_BEFORE}..${PUSH_AFTER}"
+            fi
+          else
+            # pull_request: base..HEAD. HEAD is the checkout merge commit; the
+            # three-dot form diffs against the merge base.
+            git diff --name-only "${PR_BASE_SHA}...HEAD"
+          fi
+        }
+
+        # Map a changed file to the nearest ANCESTOR directory that holds a
+        # facets.yaml, so a change inside modules/x/y/1.0/templates/foo.tpl still
+        # maps to modules/x/y/1.0 (immediate-dirname mapping would drop it and ship
+        # the module unvalidated). Bounded by the repo root; empty when none found.
+        find_module_dir() {
+          local d
+          d="$(dirname "$1")"
+          while [ -n "$d" ] && [ "$d" != "." ] && [ "$d" != "/" ]; do
+            if [ -f "$d/facets.yaml" ]; then
+              printf '%s\n' "$d"
+              return 0
+            fi
+            d="$(dirname "$d")"
+          done
+          if [ -f "facets.yaml" ]; then printf '%s\n' "."; fi
+        }
+
+        if [ "$ALL_MODULES" = "true" ]; then
+          echo "all-modules=true: scanning ${MODULES_ROOT} for every facets.yaml"
+          CANDIDATES="$(collect_all || true)"
+        else
+          CANDIDATES=""
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            md="$(find_module_dir "$f" || true)"
+            [ -n "$md" ] && CANDIDATES="${CANDIDATES} ${md}"
+          done <<< "$(changed_files || true)"
+        fi
+
+        DIRS=""
+        for d in $CANDIDATES; do
+          # Keep only directories under <prefix>modules/ that contain a facets.yaml.
+          case "$d/" in
+            "$MODULES_ROOT"/*) ;;
+            *) continue ;;
+          esac
+          if [ -f "$d/facets.yaml" ]; then
+            DIRS="$DIRS $d"
+          fi
+        done
+        # shellcheck disable=SC2086  # deliberately re-split the accumulated space-separated list
+        DIRS="$(printf '%s\n' $DIRS | sed '/^$/d' | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+
+        if [ -z "$DIRS" ]; then
+          echo "No target module directories detected."
+        else
+          echo "Target module directories:"
+          for d in $DIRS; do echo "  - $d"; done
+        fi
+        echo "dirs=${DIRS}" >> "$GITHUB_ENV"
+
+    - name: Preview modules (pull request)
+      if: env.MODE == 'preview' && env.dirs != ''
+      shell: bash
+      env:
+        CONTROL_PLANE_URL: ${{ inputs.control_plane_url }}
+        FACETS_USERNAME: ${{ inputs.username }}
+        FACETS_TOKEN: ${{ inputs.token }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        set -uo pipefail
+        FAILURES="${RUNNER_TEMP}/ci_failures"
+        COMMENT="${RUNNER_TEMP}/preview_comment.md"
+
+        # Read a top-level scalar key (intent/flavor/version) from a module's
+        # facets.yaml. Top-level keys have no leading whitespace; surrounding
+        # quotes and trailing comments are stripped.
+        meta() {
+          sed -n -E "s/^$2:[[:space:]]*(.*)$/\1/p" "$1/facets.yaml" | head -n1 \
+            | sed -E "s/[[:space:]]*#.*$//; s/^[\"']//; s/[\"'][[:space:]]*$//; s/[[:space:]]*$//"
+        }
+
+        {
+          echo "<!-- facets-module-ci:preview -->"
+          echo "### Facets module preview"
+          echo ""
+          echo "This branch now owns the single **preview slot** for each module below (concurrent PRs on the same module: last push wins)."
+          echo ""
+          echo "| Module | Type | Flavor | Version | Result |"
+          echo "|---|---|---|---|---|"
+        } > "$COMMENT"
+
+        # shellcheck disable=SC2086,SC2154  # $dirs is an intentional space-separated list injected via $GITHUB_ENV
+        for dir in $dirs; do
+          echo "::group::Preview ${dir}"
+          TYPE="$(meta "$dir" intent)"; FLAVOR="$(meta "$dir" flavor)"; VERSION="$(meta "$dir" version)"
+          REF="${TYPE}/${FLAVOR}/${VERSION}"
+          RESULT="previewed"
+          OK=1
+
+          if [ -z "$TYPE" ] || [ -z "$FLAVOR" ] || [ -z "$VERSION" ]; then
+            echo "::error::Could not read intent/flavor/version from ${dir}/facets.yaml"
+            echo "${dir} (metadata)" >> "$FAILURES"
+            RESULT="bad facets.yaml"; OK=0
+          fi
+
+          if [ "$OK" = "1" ]; then
+            echo "Validating ${REF} (dry-run)..."
+            if ! raptor create iac-module -f "$dir" --dry-run; then
+              echo "::error::Validation failed for ${REF}"
+              echo "${REF} (validate)" >> "$FAILURES"
+              RESULT="validation failed"; OK=0
+            fi
+          fi
+
+          if [ "$OK" = "1" ]; then
+            echo "Registering feature-branch preview for ${REF} at ${PR_HEAD_SHA}..."
+            if ! raptor create iac-module -f "$dir" --feature-branch --git-ref "$PR_HEAD_SHA"; then
+              echo "::error::Preview registration failed for ${REF}"
+              echo "${REF} (preview)" >> "$FAILURES"
+              RESULT="preview failed"; OK=0
+            fi
+          fi
+
+          echo "| \`${dir}\` | ${TYPE:-?} | ${FLAVOR:-?} | ${VERSION:-?} | ${RESULT} |" >> "$COMMENT"
+          echo "::endgroup::"
+        done
+
+        {
+          echo ""
+          echo "_Previews are unpublishable feature-branch registrations pinned to the PR head commit. They are cleaned up when this PR is closed (ownership-checked)._"
+        } >> "$COMMENT"
+
+    - name: Upsert preview PR comment
+      if: env.MODE == 'preview' && env.dirs != '' && inputs.github_token != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        set -uo pipefail
+        COMMENT="${RUNNER_TEMP}/preview_comment.md"
+        if [ ! -f "$COMMENT" ]; then
+          echo "No preview comment body found; nothing to post."
+          exit 0
+        fi
+        MARKER="facets-module-ci:preview"
+        EXISTING="$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
+          --jq ".[] | select(.body | contains(\"${MARKER}\")) | .id" 2>/dev/null | head -n1 || true)"
+        if [ -n "$EXISTING" ]; then
+          echo "Updating existing preview comment (${EXISTING})"
+          gh api -X PATCH "repos/${REPO}/issues/comments/${EXISTING}" -F body=@"$COMMENT" >/dev/null
+        else
+          echo "Creating preview comment on PR #${PR_NUMBER}"
+          gh api -X POST "repos/${REPO}/issues/${PR_NUMBER}/comments" -F body=@"$COMMENT" >/dev/null
+        fi
+
+    - name: Publish modules (push)
+      if: env.MODE == 'publish' && env.dirs != ''
+      shell: bash
+      env:
+        CONTROL_PLANE_URL: ${{ inputs.control_plane_url }}
+        FACETS_USERNAME: ${{ inputs.username }}
+        FACETS_TOKEN: ${{ inputs.token }}
+      run: |
+        set -uo pipefail
+        FAILURES="${RUNNER_TEMP}/ci_failures"
+
+        meta() {
+          sed -n -E "s/^$2:[[:space:]]*(.*)$/\1/p" "$1/facets.yaml" | head -n1 \
+            | sed -E "s/[[:space:]]*#.*$//; s/^[\"']//; s/[\"'][[:space:]]*$//; s/[[:space:]]*$//"
+        }
+
+        # shellcheck disable=SC2086,SC2154  # $dirs is an intentional space-separated list injected via $GITHUB_ENV
+        for dir in $dirs; do
+          echo "::group::Publish ${dir}"
+          TYPE="$(meta "$dir" intent)"; FLAVOR="$(meta "$dir" flavor)"; VERSION="$(meta "$dir" version)"
+          if [ -z "$TYPE" ] || [ -z "$FLAVOR" ] || [ -z "$VERSION" ]; then
+            echo "::error::Could not read intent/flavor/version from ${dir}/facets.yaml"
+            echo "${dir} (metadata)" >> "$FAILURES"
+            echo "::endgroup::"; continue
+          fi
+          REF="${TYPE}/${FLAVOR}/${VERSION}"
+
+          # Upload as PREVIEW. Git provenance is auto-detected from the work tree
+          # (HEAD == the pushed commit on a push build).
+          echo "Uploading ${REF}..."
+          if ! raptor create iac-module -f "$dir"; then
+            echo "::error::Upload failed for ${REF}"
+            echo "${REF} (upload)" >> "$FAILURES"
+            echo "::endgroup::"; continue
+          fi
+
+          echo "Publishing ${REF}..."
+          if ! raptor publish iac-module "$REF"; then
+            echo "::error::Publish failed for ${REF}"
+            echo "${REF} (publish)" >> "$FAILURES"
+            echo "::endgroup::"; continue
+          fi
+          echo "Published ${REF}"
+          echo "::endgroup::"
+        done
+
+    - name: Cleanup previews (pull request closed)
+      if: env.MODE == 'cleanup' && env.dirs != ''
+      shell: bash
+      env:
+        CONTROL_PLANE_URL: ${{ inputs.control_plane_url }}
+        FACETS_USERNAME: ${{ inputs.username }}
+        FACETS_TOKEN: ${{ inputs.token }}
+        GH_TOKEN: ${{ inputs.github_token }}
+        HAS_TOKEN: ${{ inputs.github_token != '' }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        set -uo pipefail
+        FAILURES="${RUNNER_TEMP}/ci_failures"
+
+        if [ "$HAS_TOKEN" != "true" ]; then
+          echo "::warning::github_token not provided; cannot read this PR's commit SHAs, so preview ownership can't be verified. Skipping cleanup."
+          exit 0
+        fi
+
+        # This PR's commit SHAs form the ownership set: a preview is only deleted
+        # if the commit that created it is one of these commits.
+        PR_SHAS="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/commits" --paginate --jq '.[].sha' 2>/dev/null || true)"
+        if [ -z "$PR_SHAS" ]; then
+          echo "::warning::Could not fetch commits for PR #${PR_NUMBER}; skipping cleanup."
+          exit 0
+        fi
+
+        # List once up front for ownership context. Distinguish a genuine list
+        # failure from an empty result, so a failed list is not silently read as
+        # "every module has no preview slot".
+        if MODULES_JSON="$(raptor get iac-module -o json 2>/dev/null)"; then
+          LIST_OK=1
+        else
+          LIST_OK=0
+          MODULES_JSON='[]'
+          echo "::warning::Could not list modules (raptor get iac-module failed); cleanup will skip every module."
+        fi
+
+        meta() {
+          sed -n -E "s/^$2:[[:space:]]*(.*)$/\1/p" "$1/facets.yaml" | head -n1 \
+            | sed -E "s/[[:space:]]*#.*$//; s/^[\"']//; s/[\"'][[:space:]]*$//; s/[[:space:]]*$//"
+        }
+
+        # owner_sha <json> <intent> <flavor> <version> -> the commit that owns the
+        # module's preview slot, resolved by stage: a PREVIEW row's own .gitRef,
+        # else a PUBLISHED row's .previewGitRef when it has a preview sibling
+        # (.previewModuleId). Tolerant of a non-array payload; empty when there is
+        # no preview slot or the list JSON carries no provenance.
+        owner_sha() {
+          printf '%s' "$1" | jq -r --arg t "$2" --arg f "$3" --arg v "$4" '
+            (if type=="array" then . else [] end)
+            | map(select(.intent==$t and .flavor==$f and .version==$v)) as $rows
+            | ($rows | map(select(.stage=="PREVIEW"))[0]) as $preview
+            | ($rows | map(select(.stage=="PUBLISHED" and ((.previewModuleId // "") != "")))[0]) as $published
+            | if $preview then ($preview.gitRef // "")
+              elif $published then ($published.previewGitRef // "")
+              else "" end
+          ' 2>/dev/null || true
+        }
+
+        # module_rows <json> <intent> <flavor> <version> -> count of matching rows.
+        module_rows() {
+          printf '%s' "$1" | jq -r --arg t "$2" --arg f "$3" --arg v "$4" \
+            '(if type=="array" then . else [] end) | map(select(.intent==$t and .flavor==$f and .version==$v)) | length' \
+            2>/dev/null || echo 0
+        }
+
+        # shellcheck disable=SC2086,SC2154  # $dirs is an intentional space-separated list injected via $GITHUB_ENV
+        for dir in $dirs; do
+          echo "::group::Cleanup ${dir}"
+          TYPE="$(meta "$dir" intent)"; FLAVOR="$(meta "$dir" flavor)"; VERSION="$(meta "$dir" version)"
+          if [ -z "$TYPE" ] || [ -z "$FLAVOR" ] || [ -z "$VERSION" ]; then
+            echo "::warning::Could not read intent/flavor/version from ${dir}/facets.yaml; skipping."
+            echo "::endgroup::"; continue
+          fi
+          REF="${TYPE}/${FLAVOR}/${VERSION}"
+
+          OWNER_SHA="$(owner_sha "$MODULES_JSON" "$TYPE" "$FLAVOR" "$VERSION")"
+          if [ -z "$OWNER_SHA" ] || [ "$OWNER_SHA" = "null" ]; then
+            # The list succeeded and the module IS present, yet no owning commit
+            # resolved — surface it rather than silently claiming "no preview slot".
+            if [ "$LIST_OK" = "1" ] && [ "$(module_rows "$MODULES_JSON" "$TYPE" "$FLAVOR" "$VERSION")" != "0" ]; then
+              echo "::warning::${REF} is in the registry but no owning commit could be resolved (no preview slot, or the list JSON lacks provenance fields); skipping."
+            else
+              echo "No preview slot recorded for ${REF}; nothing to clean up."
+            fi
+            echo "::endgroup::"; continue
+          fi
+
+          OWNED="false"
+          while IFS= read -r sha; do
+            [ -z "$sha" ] && continue
+            if [ "$sha" = "$OWNER_SHA" ]; then OWNED="true"; break; fi
+          done <<< "$PR_SHAS"
+
+          if [ "$OWNED" != "true" ]; then
+            echo "Preview for ${REF} is owned by another branch (owning commit=${OWNER_SHA}); leaving it untouched."
+            echo "::endgroup::"; continue
+          fi
+
+          # TOCTOU guard: the snapshot above may be stale (a concurrent run could
+          # have overwritten this slot). Re-fetch and re-verify the owning commit
+          # is still the one we validated as owned before deleting. A residual race
+          # remains between this re-check and the delete itself — see the README.
+          FRESH_SHA="$(owner_sha "$(raptor get iac-module -o json 2>/dev/null || echo '[]')" "$TYPE" "$FLAVOR" "$VERSION")"
+          if [ "$FRESH_SHA" != "$OWNER_SHA" ]; then
+            echo "::warning::Preview slot for ${REF} changed between the ownership check and delete (was ${OWNER_SHA}, now ${FRESH_SHA:-none}); skipping to avoid deleting a preview this PR no longer owns."
+            echo "::endgroup::"; continue
+          fi
+
+          echo "Deleting preview for ${REF} (owned by this PR, owning commit=${OWNER_SHA})..."
+          # --stage PREVIEW targets ONLY the preview doc; without it a REF that has
+          # both a published and a preview doc would delete the live published
+          # module. Keep the usage guard (no --force) so a genuinely in-use preview
+          # surfaces as a real error rather than being force-deleted.
+          if ! raptor delete iac-module "$REF" --stage PREVIEW --yes; then
+            echo "::error::Failed to delete preview for ${REF}"
+            echo "${REF} (cleanup)" >> "$FAILURES"
+          fi
+          echo "::endgroup::"
+        done
+
+    - name: Report summary and gate
+      if: always()
+      shell: bash
+      run: |
+        set -uo pipefail
+        FAILURES="${RUNNER_TEMP}/ci_failures"
+        echo "=== Facets Module CI summary (mode: ${MODE:-unknown}) ==="
+        if [ -f "$FAILURES" ] && [ -s "$FAILURES" ]; then
+          echo "The following modules failed:"
+          sed 's/^/  - /' "$FAILURES"
+          exit 1
+        fi
+        echo "All processed modules succeeded (or there was nothing to do)."

@@ -1,0 +1,63 @@
+name: "Test Facets Module CI Action"
+
+# The module-ci-action drives the raptor CLI against a live Control Plane, so it
+# cannot be meaningfully exercised end-to-end without CP credentials + a module
+# fixture. This workflow instead validates the action definition itself: the
+# action.yml must parse, and every embedded bash script must pass shellcheck.
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'module-ci-action/**'
+  pull_request:
+    paths:
+      - 'module-ci-action/**'
+  workflow_dispatch:
+
+jobs:
+  lint-action:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Validate action.yml parses and shellcheck embedded scripts
+        run: |
+          python3 - <<'PY'
+          import yaml, subprocess, tempfile, os, re, sys
+
+          action = "module-ci-action/action.yml"
+          d = yaml.safe_load(open(action))
+          steps = d["runs"]["steps"]
+          print(f"action.yml parsed OK: {len(steps)} steps")
+
+          findings = 0
+          for i, s in enumerate(steps):
+              run = s.get("run")
+              if not run:
+                  continue
+              # ${{ ... }} GitHub expressions are substituted before the shell runs;
+              # replace them with a token so shellcheck can parse the script.
+              cleaned = re.sub(r"\$\{\{[^}]*\}\}", "GHEXPR", run)
+              with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
+                  f.write("#!/usr/bin/env bash\n")
+                  f.write(cleaned)
+                  path = f.name
+              r = subprocess.run(["shellcheck", "-s", "bash", path],
+                                  capture_output=True, text=True)
+              if r.stdout.strip():
+                  findings += 1
+                  print(f"::group::shellcheck findings — step [{i}] {s.get('name')}")
+                  print(r.stdout)
+                  print("::endgroup::")
+              os.unlink(path)
+
+          if findings:
+              print(f"::error::{findings} step(s) have shellcheck findings")
+              sys.exit(1)
+          print("All embedded scripts pass shellcheck.")
+          PY

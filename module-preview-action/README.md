@@ -1,5 +1,10 @@
 # Facets Preview & Security Scan GitHub Action
 
+> ⚠️ **Deprecated.** This action is based on the legacy `ftf` CLI and is kept only for
+> existing workflows. It receives no new features. Use
+> [**module-ci-action**](../module-ci-action/README.md) instead — the `raptor`-based
+> action the Facets control plane wires into bootstrapped modules repositories.
+
 This GitHub Action performs:
 
 ✅ Terraform formatting checks  
@@ -43,7 +48,7 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Run Facets Preview & Security Scan
         uses: Facets-cloud/github-actions/module-preview-action@master
