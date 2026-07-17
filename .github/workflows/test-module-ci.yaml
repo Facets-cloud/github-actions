@@ -40,8 +40,9 @@ jobs:
               run = s.get("run")
               if not run:
                   continue
-              # ${{ ... }} GitHub expressions are substituted before the shell runs;
-              # replace them with a token so shellcheck can parse the script.
+              # GitHub expression placeholders (dollar + double braces) are substituted
+              # before the shell runs; replace them with a token so shellcheck
+              # can parse the script.
               cleaned = re.sub(r"\$\{\{[^}]*\}\}", "GHEXPR", run)
               with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
                   f.write("#!/usr/bin/env bash\n")
