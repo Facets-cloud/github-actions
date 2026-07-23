@@ -187,6 +187,10 @@ Plane. When a PR previews a module, the action registers the preview against the
 - **Validation gate (preview):** each module is first run through
   `raptor create iac-module -f <dir> --dry-run` (schema + Terraform + security checks)
   before the feature-branch registration.
+- **Security scan scope:** the Trivy scan (run by raptor) covers only the module's own
+  source. Raptor's validation runs `terraform init` first, which downloads remote module
+  dependencies into `.terraform/`; the action sets `TRIVY_SKIP_DIRS` so findings inside
+  those downloaded dependencies — code the module author never wrote — cannot fail CI.
 - **Provenance:** preview passes the PR head SHA explicitly because the PR checkout is a
   merge commit; publish relies on auto-detected provenance (on a push the checked-out
   `HEAD` *is* the pushed commit). The git remote URL is auto-detected from the work tree.

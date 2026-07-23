@@ -256,6 +256,11 @@ runs:
         FACETS_USERNAME: ${{ inputs.username }}
         FACETS_TOKEN: ${{ inputs.token }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        # Trivy runs inside raptor's module validation, AFTER terraform init has
+        # vendored remote deps into .terraform/. Trivy reads flags from TRIVY_*
+        # env vars; skip the vendored tree so findings in dependency code the
+        # module author never wrote can't fail CI (issue #13).
+        TRIVY_SKIP_DIRS: "**/.terraform,**/.terraform/**"
       run: |
         set -uo pipefail
         FAILURES="${RUNNER_TEMP}/ci_failures"
@@ -352,6 +357,9 @@ runs:
         CONTROL_PLANE_URL: ${{ inputs.control_plane_url }}
         FACETS_USERNAME: ${{ inputs.username }}
         FACETS_TOKEN: ${{ inputs.token }}
+        # Same rationale as the preview step: keep raptor's Trivy scan out of
+        # terraform-init'd dependencies under .terraform/ (issue #13).
+        TRIVY_SKIP_DIRS: "**/.terraform,**/.terraform/**"
       run: |
         set -uo pipefail
         FAILURES="${RUNNER_TEMP}/ci_failures"
