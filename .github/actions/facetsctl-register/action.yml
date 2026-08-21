@@ -1,5 +1,5 @@
-name: 'FacetsCloud CI Integration'
-description: 'Register artifacts in FacetsCloud using facetsctl'
+name: 'FacetsCloud CI Integration (deprecated)'
+description: 'DEPRECATED - use Facets-cloud/github-actions/raptor-register instead. Registers artifacts using facetsctl v2.'
 inputs:
   docker_image:
     description: 'Docker image URL in the external registry'
