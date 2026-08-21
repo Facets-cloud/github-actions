@@ -16,6 +16,7 @@ already uses, then hand the resulting URI to this action.
     artifact: my-project-api
     image: my.registry.example.com/my-project/api:${{ github.sha }}
     git_ref: ${{ github.ref_name }}
+    registry: my-ecr
 ```
 
 ## Where the build lands
@@ -37,6 +38,22 @@ To see what a project's rules actually say, and where builds landed:
 raptor get ci-cd -p <project> -a <artifact>     # the branch mapping and promotion ladder
 raptor get builds <artifact> -p <project>       # what is registered; flags unrouted builds
 ```
+
+## `registry` decides whether the resource can find the build
+
+A resource asks for its image in one of two shapes. Read which one with
+`raptor get resources -p PROJECT RESOURCE -o json`:
+
+| shape | how it resolves | `registry` |
+|---|---|---|
+| `spec.release.image: ${blueprint.self.artifacts.NAME}` | by artifact name | not needed |
+| `spec.release.build: {name: NAME, artifactory: REG}` | by registry, then name | **required, and it must be REG** |
+
+The module resolves the second shape as `all_artifactories[REG][NAME]`. A build stored
+under another registry is absent from that map, so the module falls back to the literal
+string `NOT_FOUND` and deploys **that**. The pod then sits in `InvalidImageName`, and
+nothing failed earlier to warn you. Read what a build carries with
+`raptor get builds ARTIFACT -p PROJECT -o wide`.
 
 ## Which artifact?
 
@@ -61,8 +78,9 @@ raptor get resources -p <project> -o wide       # the ARTIFACT column
 | `git_ref` | one of three | `""` | Register against this branch and let the rules place it |
 | `environment` | one of three | `""` | Register directly against this environment |
 | `release_stream` | one of three | `""` | Register directly against this release stream |
+| `registry` | see above | `""` | Registry the image lives in |
 | `external_id` | no | this run's id | CI reference recorded on the build |
-| `raptor_version` | no | `latest` | `latest` or an exact tag, e.g. `v0.1.97` |
+| `raptor_version` | no | `latest` | `latest` or an exact tag, e.g. `v0.1.98`. `--registry` needs v0.1.98 or later |
 | `raptor-download-url` | no | `""` | Exact binary URL; overrides `raptor_version` |
 
 ## Notes
@@ -95,6 +113,6 @@ is not a context an action can read — so its credentials arrive empty. Migrati
 | `git_ref` | `git_ref` |
 | `external_id` | `external_id` (optional; defaults to the run id) |
 | `registration_type` | drop it — the target input you pass says which mode you are in |
-| `registry` | drop it — the registry is where you pushed; `image` already names it |
+| `registry` | `registry` — keep it. It is not decoration: see the note above |
 | `description` | drop it — not carried on a build registration |
 | implicit `secrets.FACETS_*` | explicit `control_plane_url` / `username` / `token` inputs |

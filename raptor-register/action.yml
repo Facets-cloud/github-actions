@@ -33,6 +33,10 @@ inputs:
     description: "Register directly against this release stream. Exactly one of git_ref, environment or release_stream is required."
     required: false
     default: ""
+  registry:
+    description: "Registry the image lives in. Required when the resource asks for its image as spec.release.build {name, artifactory}: the module resolves that shape as all_artifactories[registry][name], so a build registered without it lands under 'provided', the lookup misses, and the release deploys the literal string 'NOT_FOUND'. Not needed when the resource uses spec.release.image with an artifact expression."
+    required: false
+    default: ""
   external_id:
     description: "CI run reference recorded on the build — the only link from a deployed image back to the pipeline that produced it. Defaults to this workflow run's id."
     required: false
@@ -84,6 +88,7 @@ runs:
         ENVIRONMENT: ${{ inputs.environment }}
         RELEASE_STREAM: ${{ inputs.release_stream }}
         EXTERNAL_ID: ${{ inputs.external_id }}
+        REGISTRY: ${{ inputs.registry }}
         RUN_ID: ${{ github.run_id }}
       run: |
         set -euo pipefail
@@ -105,6 +110,10 @@ runs:
           set -- -e "$ENVIRONMENT"
         else
           set -- --release-stream "$RELEASE_STREAM"
+        fi
+
+        if [ -n "$REGISTRY" ]; then
+          set -- "$@" --registry "$REGISTRY"
         fi
 
         raptor set artifact-uri -p "$PROJECT" "$@" "$ARTIFACT" \
