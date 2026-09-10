@@ -44,6 +44,10 @@ inputs:
     description: "Sub-path to the modules/ tree, relative to the repo root (e.g. 'infra/' when modules live at infra/modules/...). Empty means modules/ is at the repo root."
     required: false
     default: ""
+  auto-create-intents:
+    description: "When 'true' (default), pass --auto-create to raptor so a module whose intent does not yet exist on the Control Plane creates it. Without this, the first module of a new intent fails with 404 'Intent <kind> not found' and a modules repo cannot bootstrap a fresh Control Plane. NOTE: --auto-create also rewrites an EXISTING intent's metadata from this module's intentDetails, and an intent is shared by all its flavors — so when two flavors disagree, the last one published wins. Set to 'false' to keep intent metadata frozen, at the cost of failing on any new intent."
+    required: false
+    default: "true"
 
 runs:
   using: "composite"
@@ -256,6 +260,7 @@ runs:
         FACETS_USERNAME: ${{ inputs.username }}
         FACETS_TOKEN: ${{ inputs.token }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        AUTO_CREATE_INTENTS: ${{ inputs.auto-create-intents }}
         # Trivy runs inside raptor's module validation, AFTER terraform init has
         # vendored remote deps into .terraform/. Trivy reads flags from TRIVY_*
         # env vars; skip the vendored tree so findings in dependency code the
@@ -284,6 +289,17 @@ runs:
           echo "|---|---|---|---|---|"
         } > "$COMMENT"
 
+        # --auto-create makes raptor register the module's intent when the Control
+        # Plane has never seen that kind. Without it the upload 404s ("Intent
+        # <kind> not found"), which is what a modules repo hits the first time it
+        # carries a new intent — nothing else creates one: resource-type-mapping
+        # rejects unknown intents outright. The flag is NOT passed to --dry-run,
+        # which never touches the intent.
+        AUTO_CREATE=""
+        if [ "${AUTO_CREATE_INTENTS:-true}" = "true" ]; then
+          AUTO_CREATE="--auto-create"
+        fi
+
         # shellcheck disable=SC2086,SC2154  # $dirs is an intentional space-separated list injected via $GITHUB_ENV
         for dir in $dirs; do
           echo "::group::Preview ${dir}"
@@ -309,7 +325,8 @@ runs:
 
           if [ "$OK" = "1" ]; then
             echo "Registering feature-branch preview for ${REF} at ${PR_HEAD_SHA}..."
-            if ! raptor create iac-module -f "$dir" --feature-branch --git-ref "$PR_HEAD_SHA"; then
+            # shellcheck disable=SC2086  # $AUTO_CREATE is a deliberate empty-or-one-flag word
+            if ! raptor create iac-module -f "$dir" $AUTO_CREATE --feature-branch --git-ref "$PR_HEAD_SHA"; then
               echo "::error::Preview registration failed for ${REF}"
               echo "${REF} (preview)" >> "$FAILURES"
               RESULT="preview failed"; OK=0
@@ -357,6 +374,7 @@ runs:
         CONTROL_PLANE_URL: ${{ inputs.control_plane_url }}
         FACETS_USERNAME: ${{ inputs.username }}
         FACETS_TOKEN: ${{ inputs.token }}
+        AUTO_CREATE_INTENTS: ${{ inputs.auto-create-intents }}
         # Same rationale as the preview step: keep raptor's Trivy scan out of
         # terraform-init'd dependencies under .terraform/ (issue #13).
         TRIVY_SKIP_DIRS: "**/.terraform,**/.terraform/**"
@@ -368,6 +386,17 @@ runs:
           sed -n -E "s/^$2:[[:space:]]*(.*)$/\1/p" "$1/facets.yaml" | head -n1 \
             | sed -E "s/[[:space:]]*#.*$//; s/^[\"']//; s/[\"'][[:space:]]*$//; s/[[:space:]]*$//"
         }
+
+        # --auto-create makes raptor register the module's intent when the Control
+        # Plane has never seen that kind. Without it the upload 404s ("Intent
+        # <kind> not found"), which is what a modules repo hits the first time it
+        # carries a new intent — nothing else creates one: resource-type-mapping
+        # rejects unknown intents outright. The flag is NOT passed to --dry-run,
+        # which never touches the intent.
+        AUTO_CREATE=""
+        if [ "${AUTO_CREATE_INTENTS:-true}" = "true" ]; then
+          AUTO_CREATE="--auto-create"
+        fi
 
         # shellcheck disable=SC2086,SC2154  # $dirs is an intentional space-separated list injected via $GITHUB_ENV
         for dir in $dirs; do
@@ -383,7 +412,8 @@ runs:
           # Upload as PREVIEW. Git provenance is auto-detected from the work tree
           # (HEAD == the pushed commit on a push build).
           echo "Uploading ${REF}..."
-          if ! raptor create iac-module -f "$dir"; then
+          # shellcheck disable=SC2086  # $AUTO_CREATE is a deliberate empty-or-one-flag word
+          if ! raptor create iac-module -f "$dir" $AUTO_CREATE; then
             echo "::error::Upload failed for ${REF}"
             echo "${REF} (upload)" >> "$FAILURES"
             echo "::endgroup::"; continue

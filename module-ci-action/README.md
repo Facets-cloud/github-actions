@@ -79,6 +79,7 @@ modules live at `infra/modules/...`).
 | `all-modules` | no | `false` | When `true`, operate on **every** module under `<path-prefix>modules/` instead of only the ones the event changed. |
 | `mode` | no | `auto` | `auto` \| `preview` \| `publish` \| `cleanup`. `auto` derives the mode from the event (see the table above). Set explicitly to override. |
 | `path-prefix` | no | `""` | Sub-path to the `modules/` tree relative to the repo root (e.g. `infra/`). Empty means `modules/` is at the root. |
+| `auto-create-intents` | no | `true` | Pass `--auto-create` to raptor, so a module whose **intent** the Control Plane has never seen registers it. Without this the upload fails `404 Intent <kind> not found`. See **Intents** below before turning it off. |
 
 ### Secrets
 
@@ -91,6 +92,42 @@ modules repo. They are exported as the environment variables `raptor` reads dire
 | `CONTROL_PLANE_URL` | `CONTROL_PLANE_URL` | Control Plane base URL |
 | `FACETS_USERNAME` | `FACETS_USERNAME` | Username |
 | `FACETS_TOKEN` | `FACETS_TOKEN` | API token |
+
+
+## Intents
+
+A module's `intent` (its `kind`) is a **shared** object on the Control Plane: one
+intent, many flavors. `postgres` is an intent; `gcp-cloudsql` and `aws-rds` are
+flavors of it. Nothing in a modules repo creates an intent implicitly, and
+`raptor create resource-type-mapping` rejects one it does not know — so the first
+module of a new intent fails the upload outright:
+
+```
+Error: upload failed with status 404: {"message":"Intent gcs not found","code":"404"}
+```
+
+`auto-create-intents` (default `true`) passes raptor's `--auto-create` on the two
+steps that upload — preview registration and publish. It is deliberately **not**
+passed to the `--dry-run` validation, which never touches the intent.
+
+**The flag does two things, and the second one is shared state.** Besides creating
+a missing intent, `--auto-create` rewrites an existing intent's metadata from the
+uploading module's `intentDetails`. Because every flavor of an intent writes the
+same object, two flavors that disagree will fight, and the last module published
+wins:
+
+```yaml
+# modules/cloud_account/gcp_provider/1.0/facets.yaml
+intentDetails: { displayName: Cloud Account, ... }
+
+# modules/cloud_account/gcp_org_provider/1.0/facets.yaml
+intentDetails: { displayName: GCP Org Cloud Account, ... }   # same intent!
+```
+
+Keep `intentDetails` identical across the flavors of one intent, and treat a
+difference as a repo bug. Set `auto-create-intents: 'false'` to freeze intent
+metadata instead — at the cost of failing on any intent the Control Plane has not
+seen before.
 
 ## Example workflow
 
