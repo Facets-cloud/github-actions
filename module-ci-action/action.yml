@@ -33,9 +33,13 @@ inputs:
     required: false
     default: "0.72.0"
   all-modules:
-    description: "When 'true', operate on every module under <path-prefix>modules/ instead of only the ones changed by the triggering event."
+    description: "When 'true', operate on every module under <path-prefix>modules/ and every output type under <path-prefix>outputs/, instead of only the ones changed by the triggering event."
     required: false
     default: "false"
+  apply-output-types:
+    description: "When 'true' (default), apply the output type definitions under <path-prefix>outputs/ before touching any module. A module names its output type by reference and the Control Plane refuses a module whose type it does not already hold, so the order matters. Set to 'false' only when the output types are managed outside this repository."
+    required: false
+    default: "true"
   mode:
     description: "One of auto|preview|publish|cleanup. 'auto' (default) derives the mode from the event: pull_request opened/synchronize/reopened -> preview; push -> publish; pull_request closed -> cleanup."
     required: false
@@ -252,6 +256,140 @@ runs:
         fi
         echo "dirs=${DIRS}" >> "$GITHUB_ENV"
 
+    - name: Detect target output type definitions
+      if: (env.MODE == 'preview' || env.MODE == 'publish') && inputs.apply-output-types == 'true'
+      shell: bash
+      env:
+        ALL_MODULES: ${{ inputs.all-modules }}
+        PATH_PREFIX: ${{ inputs.path-prefix }}
+        EVENT_NAME: ${{ github.event_name }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        PUSH_BEFORE: ${{ github.event.before }}
+        PUSH_AFTER: ${{ github.sha }}
+      run: |
+        set -uo pipefail
+
+        PREFIX="${PATH_PREFIX}"
+        if [ -n "$PREFIX" ] && [ "${PREFIX%/}" = "$PREFIX" ]; then
+          PREFIX="${PREFIX}/"
+        fi
+        OUTPUTS_ROOT="${PREFIX}outputs"
+        echo "Outputs root: ${OUTPUTS_ROOT}"
+
+        # Same change detection as the modules step — kept as its own copy rather than shared,
+        # because an output type is ONE FILE, not a directory: there is no facets.yaml to walk
+        # up to, and a changed file IS the unit of work.
+        changed_files() {
+          if [ "$EVENT_NAME" = "push" ]; then
+            if [ -z "$PUSH_BEFORE" ] || [ "$PUSH_BEFORE" = "0000000000000000000000000000000000000000" ] \
+               || ! git rev-parse --verify --quiet "${PUSH_BEFORE}^{commit}" >/dev/null 2>&1; then
+              git diff-tree --no-commit-id --name-only -r "$PUSH_AFTER"
+            else
+              git diff --name-only "${PUSH_BEFORE}..${PUSH_AFTER}"
+            fi
+          else
+            git diff --name-only "${PR_BASE_SHA}...HEAD"
+          fi
+        }
+
+        is_definition() {
+          case "${1,,}" in
+            *.yaml|*.yml|*.json) return 0 ;;
+            *) return 1 ;;
+          esac
+        }
+
+        FILES=""
+        if [ "$ALL_MODULES" = "true" ]; then
+          echo "all-modules=true: scanning ${OUTPUTS_ROOT} for every definition"
+          if [ -d "$OUTPUTS_ROOT" ]; then
+            FILES="$(find "$OUTPUTS_ROOT" -type f \( -name '*.yaml' -o -name '*.yml' -o -name '*.json' \) | sort)"
+          fi
+        else
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f/" in
+              "$OUTPUTS_ROOT"/*) ;;
+              *) continue ;;
+            esac
+            # A deleted file is intentionally NOT a target: CI never deletes an output type.
+            # See the README — an output type is global and unversioned, so removing its file
+            # leaves the type in place rather than breaking every module that reads it.
+            [ -f "$f" ] || continue
+            is_definition "$f" || continue
+            FILES="${FILES} ${f}"
+          done <<< "$(changed_files || true)"
+        fi
+
+        # shellcheck disable=SC2086  # deliberately re-split the accumulated space-separated list
+        FILES="$(printf '%s\n' $FILES | sed '/^$/d' | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+
+        if [ -z "$FILES" ]; then
+          echo "No target output type definitions detected."
+        else
+          echo "Target output type definitions:"
+          for f in $FILES; do echo "  - $f"; done
+        fi
+        echo "output_files=${FILES}" >> "$GITHUB_ENV"
+
+    - name: Apply output types
+      if: (env.MODE == 'preview' || env.MODE == 'publish') && env.output_files != ''
+      shell: bash
+      env:
+        CONTROL_PLANE_URL: ${{ inputs.control_plane_url }}
+        FACETS_USERNAME: ${{ inputs.username }}
+        FACETS_TOKEN: ${{ inputs.token }}
+      run: |
+        set -uo pipefail
+        FAILURES="${RUNNER_TEMP}/ci_failures"
+        SECTION="${RUNNER_TEMP}/preview_outputs.md"
+
+        # An output type is GLOBAL and UNVERSIONED — the Control Plane keys it on name+namespace
+        # only, with no stage and no version, and a write replaces it for every module at once.
+        # So the two modes differ in kind, not in degree:
+        #
+        #   preview (pull request): --if-absent. A type the Control Plane has never seen has no
+        #     consumers, so creating it is safe AND necessary — without it, a pull request that
+        #     adds a module together with its new output type cannot validate its own module
+        #     (the upload 404s with "Output @ns/name not found"). A type that already exists is
+        #     only reported, never written: there is no preview slot to hold a change and no
+        #     rollback if it is wrong.
+        #
+        #   publish (push): the full apply. raptor still refuses a change that removes or retypes
+        #     a field while some module uses the type; that is a real gate, not advice.
+        MODE_FLAG=""
+        if [ "$MODE" = "preview" ]; then
+          MODE_FLAG="--if-absent"
+        fi
+
+        {
+          echo "### Facets output types"
+          echo ""
+          echo "| Definition | Result |"
+          echo "|---|---|"
+        } > "$SECTION"
+
+        # shellcheck disable=SC2086,SC2154  # $output_files is an intentional space-separated list injected via $GITHUB_ENV
+        for file in $output_files; do
+          echo "::group::Output type ${file}"
+          # shellcheck disable=SC2086  # $MODE_FLAG is a deliberate empty-or-one-flag word
+          if raptor create output-type -f "$file" $MODE_FLAG; then
+            RESULT="applied"
+            if [ "$MODE" = "preview" ]; then RESULT="created if absent"; fi
+          else
+            echo "::error::Output type apply failed for ${file}"
+            echo "${file} (output-type)" >> "$FAILURES"
+            RESULT="failed"
+          fi
+          echo "| \`${file}\` | ${RESULT} |" >> "$SECTION"
+          echo "::endgroup::"
+        done
+
+        {
+          echo ""
+          echo "_On a pull request an output type is only created when the control plane does not have it. A change to an existing type is reported here and applied on merge, because an output type has no version and no preview stage._"
+        } >> "$SECTION"
+
     - name: Preview modules (pull request)
       if: env.MODE == 'preview' && env.dirs != ''
       shell: bash
@@ -269,7 +407,7 @@ runs:
       run: |
         set -uo pipefail
         FAILURES="${RUNNER_TEMP}/ci_failures"
-        COMMENT="${RUNNER_TEMP}/preview_comment.md"
+        COMMENT="${RUNNER_TEMP}/preview_modules.md"
 
         # Read a top-level scalar key (intent/flavor/version) from a module's
         # facets.yaml. Top-level keys have no leading whitespace; surrounding
@@ -280,7 +418,6 @@ runs:
         }
 
         {
-          echo "<!-- facets-module-ci:preview -->"
           echo "### Facets module preview"
           echo ""
           echo "This branch now owns the single **preview slot** for each module below (concurrent PRs on the same module: last push wins)."
@@ -343,7 +480,7 @@ runs:
         } >> "$COMMENT"
 
     - name: Upsert preview PR comment
-      if: env.MODE == 'preview' && env.dirs != '' && inputs.github_token != ''
+      if: env.MODE == 'preview' && (env.dirs != '' || env.output_files != '') && inputs.github_token != ''
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github_token }}
@@ -352,7 +489,21 @@ runs:
       run: |
         set -uo pipefail
         COMMENT="${RUNNER_TEMP}/preview_comment.md"
-        if [ ! -f "$COMMENT" ]; then
+        MODULES_SECTION="${RUNNER_TEMP}/preview_modules.md"
+        OUTPUTS_SECTION="${RUNNER_TEMP}/preview_outputs.md"
+
+        # Assemble the body here rather than in the producing steps: a PR can touch output types
+        # only, modules only, or both, and the marker must sit in the final body exactly once.
+        echo "<!-- facets-module-ci:preview -->" > "$COMMENT"
+        if [ -f "$OUTPUTS_SECTION" ]; then
+          cat "$OUTPUTS_SECTION" >> "$COMMENT"
+          echo "" >> "$COMMENT"
+        fi
+        if [ -f "$MODULES_SECTION" ]; then
+          cat "$MODULES_SECTION" >> "$COMMENT"
+        fi
+
+        if [ ! -f "$MODULES_SECTION" ] && [ ! -f "$OUTPUTS_SECTION" ]; then
           echo "No preview comment body found; nothing to post."
           exit 0
         fi

@@ -9,8 +9,8 @@ triggering event:
 
 | Event | Mode | What it does |
 |-------|------|--------------|
-| `pull_request` opened / synchronize / reopened | **preview** | Validates each changed module, then registers a **feature-branch preview** pinned to the PR head commit. Optionally upserts a PR comment. |
-| `push` (to your default branch) | **publish** | Uploads each changed module and **publishes** it (PREVIEW → PUBLISHED). |
+| `pull_request` opened / synchronize / reopened | **preview** | Creates each changed output type the Control Plane does not have yet, then validates each changed module and registers a **feature-branch preview** pinned to the PR head commit. Optionally upserts a PR comment. |
+| `push` (to your default branch) | **publish** | Applies each changed output type, then uploads each changed module and **publishes** it (PREVIEW → PUBLISHED). |
 | `pull_request` **closed without merge** | **cleanup** | Deletes the preview each changed module owns — **only if** the preview belongs to a commit from this PR. |
 | `pull_request` **closed by merge** | **no-op** | Skipped: the concurrent `push` (publish) run re-uploads and publishes the module at the merge commit, so it owns the slot. Running cleanup here would be redundant and could race the publish. |
 
@@ -20,7 +20,8 @@ triggering event:
 
 ## Modules-repo layout
 
-Each module lives at a versioned path and contains a `facets.yaml` plus its Terraform:
+A modules repository holds two trees: the modules, and the **output types** they
+exchange.
 
 ```
 modules/
@@ -31,14 +32,54 @@ modules/
         main.tf
         variables.tf
         outputs.tf
+outputs/
+  <namespace>/
+    <name>.yaml             # name: "@namespace/name", properties:, providers:
 ```
 
 The action discovers a module as **any directory under `modules/` that contains a
 `facets.yaml`**. `intent`, `flavor`, and `version` are read from that `facets.yaml`
 and form the module reference `intent/flavor/version` used by `raptor`.
 
-If your modules tree is not at the repo root, set `path-prefix` (e.g. `infra/` when
-modules live at `infra/modules/...`).
+It discovers an output type as **any `.yaml`, `.yml` or `.json` file under
+`outputs/`**. Each file names itself through its `name` field; the directory layout is
+a convention, not a lookup key. `raptor get output-type @namespace/name -o yaml`
+prints exactly this shape, so an existing type can be saved to a file, edited, and
+committed.
+
+If your trees are not at the repo root, set `path-prefix` (e.g. `infra/` when they
+live at `infra/modules/...` and `infra/outputs/...`).
+
+## Output types
+
+A module names its output type by reference (`@namespace/name`). The Control Plane
+**refuses a module upload whose output type it does not already hold**
+(`Output @ns/name not found`), so the action always applies the output types first,
+in both preview and publish mode.
+
+An output type is different from a module in one way that drives everything here: it
+is **global and unversioned**. The Control Plane keys it on `name` + `namespace`
+alone — there is no preview stage, no version, and a write replaces it for every
+module and every environment at once. There is no slot to hold a proposed change and
+nothing to roll back to.
+
+So the two modes are not the same operation at different strengths:
+
+| Mode | What happens to an output type |
+|------|-------------------------------|
+| **preview** (pull request) | `raptor create output-type -f <file> --if-absent`. A type the Control Plane has never seen is **created** — it has no consumers, so the write cannot break anything, and it is the only way a PR that adds a module *and* its new type can validate its own module. A type that already exists is **only reported**; the PR comment lists what would change. |
+| **publish** (push) | The full apply. raptor still refuses a change that removes or retypes a field while some module produces or consumes the type, and names those modules. Run `raptor create output-type -f <file> --allow-breaking` yourself when you really mean it. |
+| **cleanup** (PR closed) | Nothing. See below. |
+
+**The action never deletes an output type.** Removing a file from `outputs/` leaves
+the type in place; delete it deliberately with
+`raptor module delete-output-type @namespace/name --yes`. Two reasons: a type deleted
+on a PR-close would break every module that reads it with no preview slot to restore
+it from, and a type has no provenance fields, so there is no ownership check like the
+one the module cleanup relies on.
+
+Set `apply-output-types: 'false'` when the output types are managed outside this
+repository.
 
 ## Requirements
 
@@ -76,9 +117,10 @@ modules live at `infra/modules/...`).
 | `raptor-download-url` | no | `""` | Exact URL to download the raptor `linux-amd64` binary from, bypassing the default `Facets-cloud/raptor-releases` location. When set, `raptor_version` is ignored. An escape hatch for testing / pre-release raptor builds and enterprise mirrors. |
 | `terraform-version` | no | `1.5.7` | Terraform version installed (from `releases.hashicorp.com`) for raptor's module validation. Not installed in **cleanup** mode. |
 | `trivy-version` | no | `0.72.0` | Trivy version installed (from `aquasecurity/trivy` releases, no `v` prefix) for raptor's module security scan. Not installed in **cleanup** mode. |
-| `all-modules` | no | `false` | When `true`, operate on **every** module under `<path-prefix>modules/` instead of only the ones the event changed. |
+| `all-modules` | no | `false` | When `true`, operate on **every** module under `<path-prefix>modules/` and **every** output type under `<path-prefix>outputs/`, instead of only the ones the event changed. |
+| `apply-output-types` | no | `true` | Apply the output type definitions under `<path-prefix>outputs/` before touching any module. See **Output types** above. Set to `false` when they are managed outside this repository. |
 | `mode` | no | `auto` | `auto` \| `preview` \| `publish` \| `cleanup`. `auto` derives the mode from the event (see the table above). Set explicitly to override. |
-| `path-prefix` | no | `""` | Sub-path to the `modules/` tree relative to the repo root (e.g. `infra/`). Empty means `modules/` is at the root. |
+| `path-prefix` | no | `""` | Sub-path to the `modules/` and `outputs/` trees relative to the repo root (e.g. `infra/`). Empty means both are at the root. |
 | `auto-create-intents` | no | `true` | Pass `--auto-create` to raptor, so a module whose **intent** the Control Plane has never seen registers it. Without this the upload fails `404 Intent <kind> not found`. See **Intents** below before turning it off. |
 
 ### Secrets
