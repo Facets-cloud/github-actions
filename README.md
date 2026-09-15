@@ -7,17 +7,23 @@ Releases are semver tags with a moving major alias (`v1` always points at the la
 ## 1. Facets Module CI (current)
 
 The **Facets Module CI** GitHub Action provides end-to-end CI for a Facets **modules
-repository** (`modules/{intent}/{flavor}/{version}`) using the **`raptor`** CLI. It runs
+repository** — the modules at `modules/{intent}/{flavor}/{version}` and the output types
+they exchange at `outputs/{namespace}/{name}.yaml` — using the **`raptor`** CLI. It runs
 in three modes, derived automatically from the triggering event:
 
 [module-ci-action README](./module-ci-action/README.md).
 
-- **Preview (on pull request)**: Validates each changed module, then registers an
-  unpublishable feature-branch preview pinned to the PR head commit (optionally posts a
-  PR comment).
-- **Publish (on push)**: Uploads and publishes each changed module (PREVIEW → PUBLISHED).
+- **Preview (on pull request)**: Creates each changed output type the control plane does
+  not have yet, then validates each changed module and registers an unpublishable
+  feature-branch preview pinned to the PR head commit (optionally posts a PR comment).
+- **Publish (on push)**: Applies each changed output type, then uploads and publishes each
+  changed module (PREVIEW → PUBLISHED).
 - **Cleanup (on pull request close)**: Deletes each changed module's preview, but only
-  the previews this PR's own commits created (ownership-checked).
+  the previews this PR's own commits created (ownership-checked). Output types are never
+  deleted — they are global and unversioned.
+
+Output types are always applied **before** any module: a module names its output type by
+reference, and the control plane refuses a module whose type it does not already hold.
 
 This is the action the Facets control plane wires into bootstrapped modules
 repositories, and the recommended CI for all modules repos.
