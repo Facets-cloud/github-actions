@@ -584,8 +584,52 @@ runs:
             echo "::endgroup::"; continue
           fi
 
+          # raptor refuses to publish over an already-published version without an
+          # explicit compatibility declaration, and refuses a NEW version without
+          # --versionupgrade. A bare publish therefore fails for every module a
+          # repository has already shipped.
+          #
+          # In a repo-first flow the author HAS declared, in git: editing
+          # modules/{intent}/{flavor}/0.2 in place says "compatible"; adding a 0.3
+          # directory says "breaking". Read that choice back off the registry and
+          # pass the matching flag. Version ORDERING stays raptor's job — a bump
+          # that is not actually greater is rejected there, and must be.
+          if ! MODULES_JSON="$(raptor get iac-module -o json 2>/dev/null)"; then
+            echo "::error::Could not list modules to determine the compatibility declaration for ${REF}"
+            echo "${REF} (publish)" >> "$FAILURES"
+            echo "::endgroup::"; continue
+          fi
+          family() {
+            printf '%s' "$MODULES_JSON" | jq -r --arg t "$TYPE" --arg f "$FLAVOR" --arg v "$1" \
+              '(if type=="array" then . else [] end)
+               | map(select(.intent==$t and .flavor==$f and .stage=="PUBLISHED"
+                            and ($v=="" or .version==$v)))
+               | length' 2>/dev/null || echo ""
+          }
+          PUBLISHED_ANY="$(family "")"
+          PUBLISHED_TARGET="$(family "$VERSION")"
+          if [ -z "$PUBLISHED_ANY" ] || [ -z "$PUBLISHED_TARGET" ]; then
+            # A failed count is not "nothing is published" — that reading would send
+            # a first-publication (no flag) for a module that already has one.
+            echo "::error::Could not read published versions of ${TYPE}/${FLAVOR} for ${REF}"
+            echo "${REF} (publish)" >> "$FAILURES"
+            echo "::endgroup::"; continue
+          fi
+
+          DECLARATION=""
+          if [ "$PUBLISHED_TARGET" != "0" ]; then
+            DECLARATION="--backward-compatible yes"
+            echo "${VERSION} is already published: declaring a compatible update."
+          elif [ "$PUBLISHED_ANY" != "0" ]; then
+            DECLARATION="--versionupgrade"
+            echo "${VERSION} is a new contract version for ${TYPE}/${FLAVOR}: declaring a version upgrade."
+          else
+            echo "First publication of ${TYPE}/${FLAVOR}: no declaration needed."
+          fi
+
           echo "Publishing ${REF}..."
-          if ! raptor publish iac-module "$REF"; then
+          # shellcheck disable=SC2086  # $DECLARATION is a deliberate empty-or-flag word list
+          if ! raptor publish iac-module "$REF" $DECLARATION; then
             echo "::error::Publish failed for ${REF}"
             echo "${REF} (publish)" >> "$FAILURES"
             echo "::endgroup::"; continue
