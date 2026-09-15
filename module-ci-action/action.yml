@@ -365,29 +365,43 @@ runs:
         {
           echo "### Facets output types"
           echo ""
-          echo "| Definition | Result |"
-          echo "|---|---|"
+          echo "| Definition | Type | Result | Reported changes |"
+          echo "|---|---|---|---|"
         } > "$SECTION"
 
         # shellcheck disable=SC2086,SC2154  # $output_files is an intentional space-separated list injected via $GITHUB_ENV
         for file in $output_files; do
           echo "::group::Output type ${file}"
+          # Capture raptor's own outcome rather than restating the flag. The whole
+          # point of the comment is to answer "which of these did this PR create,
+          # and which already exist and will therefore CHANGE on merge?" — a
+          # per-file constant cannot answer it.
           # shellcheck disable=SC2086  # $MODE_FLAG is a deliberate empty-or-one-flag word
-          if raptor create output-type -f "$file" $MODE_FLAG; then
-            RESULT="applied"
-            if [ "$MODE" = "preview" ]; then RESULT="created if absent"; fi
+          if OUTPUT="$(raptor create output-type -f "$file" $MODE_FLAG 2>&1)"; then
+            printf '%s\n' "$OUTPUT"
+            RESULT="$(printf '%s\n' "$OUTPUT" | sed -n "s/^✓ Output type '.*' \(.*\)\$/\1/p" | tail -n1)"
+            [ -n "$RESULT" ] || RESULT="applied"
           else
+            printf '%s\n' "$OUTPUT"
             echo "::error::Output type apply failed for ${file}"
             echo "${file} (output-type)" >> "$FAILURES"
             RESULT="failed"
           fi
-          echo "| \`${file}\` | ${RESULT} |" >> "$SECTION"
+
+          # The reference raptor resolved, and the compatibility findings it
+          # printed. A row that says "skipped (already exists)" with findings is
+          # the one a reviewer has to look at: those changes land on merge.
+          REF="$(printf '%s\n' "$OUTPUT" | sed -n "s/^✓ Output type '\(@[^']*\)'.*\$/\1/p" | tail -n1)"
+          # Join on "; " and escape "|", which would otherwise split the table cell.
+          NOTES="$(printf '%s\n' "$OUTPUT" | sed -n 's/^  ⚠️  //p' | sed 's/|/\\|/g' | paste -sd ';' - | sed 's/;/; /g')"
+          [ -n "$NOTES" ] || NOTES="—"
+          echo "| \`${file}\` | \`${REF:-?}\` | ${RESULT} | ${NOTES} |" >> "$SECTION"
           echo "::endgroup::"
         done
 
         {
           echo ""
-          echo "_On a pull request an output type is only created when the control plane does not have it. A change to an existing type is reported here and applied on merge, because an output type has no version and no preview stage._"
+          echo "_On a pull request an output type is only created when the control plane does not have it. A row that already exists is left untouched — any change listed against it lands when this PR merges, because an output type has no version and no preview stage._"
         } >> "$SECTION"
 
     - name: Preview modules (pull request)

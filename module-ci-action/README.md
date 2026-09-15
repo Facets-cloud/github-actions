@@ -67,7 +67,7 @@ So the two modes are not the same operation at different strengths:
 
 | Mode | What happens to an output type |
 |------|-------------------------------|
-| **preview** (pull request) | `raptor create output-type -f <file> --if-absent`. A type the Control Plane has never seen is **created** — it has no consumers, so the write cannot break anything, and it is the only way a PR that adds a module *and* its new type can validate its own module. A type that already exists is **only reported**; the PR comment lists what would change. |
+| **preview** (pull request) | `raptor create output-type -f <file> --if-absent`. A type the Control Plane has never seen is **created** — it has no consumers, so the write cannot break anything, and it is the only way a PR that adds a module *and* its new type can validate its own module. A type that already exists is **only reported**. The PR comment gives raptor's own per-file outcome (`created` vs `skipped (already exists)`) plus any compatibility findings, so a reviewer can see which definitions this PR creates and which already exist and will therefore change on merge. |
 | **publish** (push) | The full apply. raptor still refuses a change that removes or retypes a field while some module produces or consumes the type, and names those modules. Run `raptor create output-type -f <file> --allow-breaking` yourself when you really mean it. |
 | **cleanup** (PR closed) | Nothing. See below. |
 
