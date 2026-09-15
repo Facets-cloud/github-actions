@@ -10,7 +10,7 @@ triggering event:
 | Event | Mode | What it does |
 |-------|------|--------------|
 | `pull_request` opened / synchronize / reopened | **preview** | Creates each changed output type the Control Plane does not have yet, then validates each changed module and registers a **feature-branch preview** pinned to the PR head commit. Optionally upserts a PR comment. |
-| `push` (to your default branch) | **publish** | Applies each changed output type, then uploads each changed module and **publishes** it (PREVIEW → PUBLISHED). |
+| `push` (to your default branch) | **publish** | Applies each changed output type, then uploads each changed module and **publishes** it (PREVIEW → PUBLISHED), declaring compatibility from the registry state — see **Compatibility declarations** below. |
 | `pull_request` **closed without merge** | **cleanup** | Deletes the preview each changed module owns — **only if** the preview belongs to a commit from this PR. |
 | `pull_request` **closed by merge** | **no-op** | Skipped: the concurrent `push` (publish) run re-uploads and publishes the module at the merge commit, so it owns the slot. Running cleanup here would be redundant and could race the publish. |
 
@@ -49,6 +49,30 @@ committed.
 
 If your trees are not at the repo root, set `path-prefix` (e.g. `infra/` when they
 live at `infra/modules/...` and `infra/outputs/...`).
+
+## Compatibility declarations
+
+`raptor publish` refuses to publish over an already-published version without an
+explicit `--backward-compatible yes`, and refuses a new contract version without
+`--versionupgrade` (raptor ≥ v0.1.106). A bare publish therefore fails for every
+module a repository has already shipped.
+
+In a repo-first flow the author has already declared, in git:
+
+| What the author did | What CI passes |
+|---|---|
+| Edited `modules/{intent}/{flavor}/0.2` in place | `--backward-compatible yes` |
+| Added a new `modules/{intent}/{flavor}/0.3` directory | `--versionupgrade` |
+| Added the first module of a type/flavor | nothing |
+
+The action reads the published versions of that `intent/flavor` back off the
+Control Plane and passes the matching flag. Version **ordering** stays raptor's
+job: a "bump" that is not actually greater than every published version is
+rejected there, and should be.
+
+If the listing cannot be read, the module fails rather than publishing with a
+guessed declaration — reading a failed count as "nothing is published" would send
+a first-publication for a module that already has one.
 
 ## Output types
 
