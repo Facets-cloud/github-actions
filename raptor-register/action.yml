@@ -1,0 +1,121 @@
+name: "Facets Artifact Register"
+description: "Register a built image against a Facets artifact using the raptor CLI — by environment, git ref, or release stream."
+author: "Facets"
+
+inputs:
+  control_plane_url:
+    description: "Facets Control Plane URL, e.g. https://your-org.console.facets.cloud."
+    required: true
+  username:
+    description: "Facets username."
+    required: true
+  token:
+    description: "Facets API token. Pass a secret — never a literal."
+    required: true
+  project:
+    description: "Project (blueprint) the artifact belongs to."
+    required: true
+  artifact:
+    description: "Artifact to register the build against. This is the CI integration's name, which is NOT always the resource name — read it from the ARTIFACT column of 'raptor get resources -p <project> -o wide'."
+    required: true
+  image:
+    description: "Full image URI to register, including the tag. The image must already be pushed; this action registers it, it does not build or push."
+    required: true
+  git_ref:
+    description: "Register against this branch and let the project's routing rules decide the target. Exactly one of git_ref, environment or release_stream is required."
+    required: false
+    default: ""
+  environment:
+    description: "Register directly against this environment. Exactly one of git_ref, environment or release_stream is required."
+    required: false
+    default: ""
+  release_stream:
+    description: "Register directly against this release stream. Exactly one of git_ref, environment or release_stream is required."
+    required: false
+    default: ""
+  registry:
+    description: "Registry the image lives in. Required when the resource asks for its image as spec.release.build {name, artifactory}: the module resolves that shape as all_artifactories[registry][name], so a build registered without it lands under 'provided', the lookup misses, and the release deploys the literal string 'NOT_FOUND'. Not needed when the resource uses spec.release.image with an artifact expression."
+    required: false
+    default: ""
+  external_id:
+    description: "CI run reference recorded on the build — the only link from a deployed image back to the pipeline that produced it. Defaults to this workflow run's id."
+    required: false
+    default: ""
+  raptor_version:
+    description: "raptor CLI version to install: 'latest' or an exact release tag (e.g. v0.1.97). Ignored when raptor-download-url is set."
+    required: false
+    default: "latest"
+  raptor-download-url:
+    description: "Exact URL to download the raptor linux-amd64 binary from, bypassing the default Facets-cloud/raptor-releases location. When set, raptor_version is ignored. Escape hatch for testing/pre-release builds and enterprise mirrors."
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install raptor CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+        VERSION="${{ inputs.raptor_version }}"
+        DOWNLOAD_URL="${{ inputs.raptor-download-url }}"
+        if [ -n "$DOWNLOAD_URL" ]; then
+          # Explicit override: fetch the binary from exactly this URL (raptor_version ignored).
+          URL="$DOWNLOAD_URL"
+        elif [ -z "$VERSION" ] || [ "$VERSION" = "latest" ]; then
+          URL="https://github.com/Facets-cloud/raptor-releases/releases/latest/download/raptor-linux-amd64"
+        else
+          URL="https://github.com/Facets-cloud/raptor-releases/releases/download/${VERSION}/raptor-linux-amd64"
+        fi
+        echo "Installing raptor from ${URL}"
+        curl -fsSL -o raptor "$URL"
+        chmod +x raptor
+        sudo mv raptor /usr/local/bin/raptor
+
+    - name: Register the build
+      shell: bash
+      # raptor auth is set here, not exported job-wide, so the token stays out of
+      # every other step in the caller's job.
+      env:
+        CONTROL_PLANE_URL: ${{ inputs.control_plane_url }}
+        FACETS_USERNAME: ${{ inputs.username }}
+        FACETS_TOKEN: ${{ inputs.token }}
+        RAPTOR_NO_UPDATE_CHECK: "1"
+        PROJECT: ${{ inputs.project }}
+        ARTIFACT: ${{ inputs.artifact }}
+        IMAGE: ${{ inputs.image }}
+        GIT_REF: ${{ inputs.git_ref }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        RELEASE_STREAM: ${{ inputs.release_stream }}
+        EXTERNAL_ID: ${{ inputs.external_id }}
+        REGISTRY: ${{ inputs.registry }}
+        RUN_ID: ${{ github.run_id }}
+      run: |
+        set -euo pipefail
+
+        # Exactly one target. Registering against two would be two different builds,
+        # and against none would be a build nothing can deploy.
+        TARGETS=0
+        [ -n "$GIT_REF" ] && TARGETS=$((TARGETS + 1)) || true
+        [ -n "$ENVIRONMENT" ] && TARGETS=$((TARGETS + 1)) || true
+        [ -n "$RELEASE_STREAM" ] && TARGETS=$((TARGETS + 1)) || true
+        if [ "$TARGETS" -ne 1 ]; then
+          echo "::error::Set exactly one of git_ref, environment or release_stream (got ${TARGETS})."
+          exit 1
+        fi
+
+        if [ -n "$GIT_REF" ]; then
+          set -- --git-ref "$GIT_REF"
+        elif [ -n "$ENVIRONMENT" ]; then
+          set -- -e "$ENVIRONMENT"
+        else
+          set -- --release-stream "$RELEASE_STREAM"
+        fi
+
+        if [ -n "$REGISTRY" ]; then
+          set -- "$@" --registry "$REGISTRY"
+        fi
+
+        raptor set artifact-uri -p "$PROJECT" "$@" "$ARTIFACT" \
+          --uri "$IMAGE" \
+          --external-id "${EXTERNAL_ID:-$RUN_ID}"
