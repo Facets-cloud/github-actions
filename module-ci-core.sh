@@ -4,15 +4,15 @@
 # Shared by the GitHub action (module-ci-action) and the GitLab template
 # (module-ci-gitlab). Each host supplies thin glue that resolves the mode,
 # the git diff range, and the ownership SHAs, then calls this script; the
-# host posts the review comment this script writes to $CI_COMMENT_DIR.
+# host posts the review comment this script writes to $MC_COMMENT_DIR.
 #
 # Generic env contract (host glue sets these — this script reads NOTHING
 # host-specific like GITHUB_* or CI_MERGE_REQUEST_*):
 #   MODE               preview | publish | cleanup | noop
-#   CI_DIFF_RANGE      git range for changed files ("base..head" / "base...head");
+#   MC_DIFF_RANGE      git range for changed files ("base..head" / "base...head");
 #                      empty => diff-tree against HEAD (new branch / unknown base)
-#   CI_HEAD_SHA        commit a preview is pinned to (preview mode)
-#   CI_OWNER_SHAS      newline-separated commit SHAs that own previews (cleanup);
+#   MC_HEAD_SHA        commit a preview is pinned to (preview mode)
+#   MC_OWNER_SHAS      newline-separated commit SHAs that own previews (cleanup);
 #                      empty => cannot verify ownership, cleanup skipped
 #   PATH_PREFIX        sub-path to modules/ (e.g. "infra/"); empty => repo root
 #   ALL_MODULES        "true" => every module/output, not just changed ones
@@ -20,7 +20,7 @@
 #   AUTO_CREATE_INTENTS "true" (default) => raptor --auto-create for new intents
 #   CONTROL_PLANE_URL / FACETS_USERNAME / FACETS_TOKEN   raptor auth (read by raptor)
 #   RAPTOR_VERSION / RAPTOR_DOWNLOAD_URL / TERRAFORM_VERSION / TRIVY_VERSION
-#   CI_COMMENT_DIR     dir to write preview_outputs.md / preview_modules.md
+#   MC_COMMENT_DIR     dir to write preview_outputs.md / preview_modules.md
 #                      (default: a temp dir, printed at the end)
 set -uo pipefail
 
@@ -34,9 +34,9 @@ RAPTOR_DOWNLOAD_URL="${RAPTOR_DOWNLOAD_URL:-}"
 TERRAFORM_VERSION="${TERRAFORM_VERSION:-1.5.7}"
 TRIVY_VERSION="${TRIVY_VERSION:-0.72.0}"
 WORK="$(mktemp -d)"
-CI_COMMENT_DIR="${CI_COMMENT_DIR:-$WORK}"
+MC_COMMENT_DIR="${MC_COMMENT_DIR:-$WORK}"
 FAILURES="${WORK}/ci_failures"
-mkdir -p "$CI_COMMENT_DIR"
+mkdir -p "$MC_COMMENT_DIR"
 # Keep raptor's Trivy scan out of terraform-init'd dependency trees (issue #13).
 export TRIVY_SKIP_DIRS="${TRIVY_SKIP_DIRS:-**/.terraform,**/.terraform/**}"
 
@@ -51,12 +51,12 @@ meta() {
     | sed -E "s/[[:space:]]*#.*$//; s/^[\"']//; s/[\"'][[:space:]]*$//; s/[[:space:]]*$//"
 }
 
-# Changed files for this event, via the host-formed CI_DIFF_RANGE. Empty range
+# Changed files for this event, via the host-formed MC_DIFF_RANGE. Empty range
 # (new branch / unreachable base) falls back to the pushed commit's own tree so
 # git diff never errors and silently skips every module.
 changed_files() {
-  if [ -n "${CI_DIFF_RANGE:-}" ]; then
-    git diff --name-only "${CI_DIFF_RANGE}"
+  if [ -n "${MC_DIFF_RANGE:-}" ]; then
+    git diff --name-only "${MC_DIFF_RANGE}"
   else
     git diff-tree --no-commit-id --name-only -r HEAD
   fi
@@ -89,9 +89,12 @@ prefix() {
 
 install_tools() {
   # Install only what's missing — a fresh CI runner installs all three; a dev
-  # machine that already has them is a no-op. Modes that don't run raptor's
-  # module validation (cleanup/noop) don't need terraform/trivy.
-  local p; p="$(prefix)"
+  # machine (or a pre-provisioned runner) that already has them is a no-op. Modes
+  # that don't run raptor's module validation (cleanup/noop) don't need tf/trivy.
+  # GitHub runners are non-root with sudo; GitLab containers are usually root
+  # without sudo — so only use sudo when not root and it exists.
+  local sudo=""
+  [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && sudo="sudo"
   if ! command -v raptor >/dev/null 2>&1; then
     local url
     if [ -n "$RAPTOR_DOWNLOAD_URL" ]; then url="$RAPTOR_DOWNLOAD_URL"
@@ -101,20 +104,23 @@ install_tools() {
       url="https://github.com/Facets-cloud/raptor-releases/releases/download/${RAPTOR_VERSION}/raptor-linux-amd64"
     fi
     log "Installing raptor from ${url}"
-    curl -fsSL -o /tmp/raptor "$url" && chmod +x /tmp/raptor && sudo mv /tmp/raptor /usr/local/bin/raptor
+    # shellcheck disable=SC2086  # $sudo is a deliberate empty-or-"sudo" word
+    curl -fsSL -o /tmp/raptor "$url" && chmod +x /tmp/raptor && $sudo mv /tmp/raptor /usr/local/bin/raptor
   else
     log "raptor already present: $(command -v raptor)"
   fi
   if [ "$MODE" = "preview" ] || [ "$MODE" = "publish" ]; then
     if ! command -v terraform >/dev/null 2>&1; then
       log "Installing Terraform ${TERRAFORM_VERSION}..."
+      # shellcheck disable=SC2086  # $sudo is a deliberate empty-or-"sudo" word
       curl -fsSL -o /tmp/tf.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" \
-        && (cd /tmp && unzip -o tf.zip terraform) && sudo mv /tmp/terraform /usr/local/bin/terraform
+        && (cd /tmp && unzip -o tf.zip terraform) && $sudo mv /tmp/terraform /usr/local/bin/terraform
     fi
     if ! command -v trivy >/dev/null 2>&1; then
       log "Installing Trivy ${TRIVY_VERSION}..."
+      # shellcheck disable=SC2086  # $sudo is a deliberate empty-or-"sudo" word
       curl -fsSL -o /tmp/trivy.tgz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
-        && (cd /tmp && tar -xzf trivy.tgz trivy) && sudo mv /tmp/trivy /usr/local/bin/trivy
+        && (cd /tmp && tar -xzf trivy.tgz trivy) && $sudo mv /tmp/trivy /usr/local/bin/trivy
     fi
   fi
 }
@@ -162,7 +168,7 @@ detect_output_files() {
 # --- output types (applied BEFORE modules; a module refs its type by name) ----
 
 apply_output_types() {
-  local files="$1" section="${CI_COMMENT_DIR}/preview_outputs.md"
+  local files="$1" section="${MC_COMMENT_DIR}/preview_outputs.md"
   [ -n "$files" ] || return 0
   local mode_flag=""
   [ "$MODE" = "preview" ] && mode_flag="--if-absent"
@@ -189,7 +195,7 @@ apply_output_types() {
 auto_create_flag() { [ "${AUTO_CREATE_INTENTS:-true}" = "true" ] && printf '%s' "--auto-create"; }
 
 preview_modules() {
-  local dirs="$1" comment="${CI_COMMENT_DIR}/preview_modules.md" ac; ac="$(auto_create_flag)"
+  local dirs="$1" comment="${MC_COMMENT_DIR}/preview_modules.md" ac; ac="$(auto_create_flag)"
   [ -n "$dirs" ] || return 0
   { echo "### Facets module preview"; echo; echo "This branch now owns the single **preview slot** for each module below (concurrent MRs on the same module: last push wins)."; echo; echo "| Module | Type | Flavor | Version | Result |"; echo "|---|---|---|---|---|"; } > "$comment"
   local dir type flavor version ref result ok
@@ -199,7 +205,7 @@ preview_modules() {
     if [ -z "$type" ] || [ -z "$flavor" ] || [ -z "$version" ]; then log "::error::Could not read intent/flavor/version from ${dir}/facets.yaml"; fail "${dir} (metadata)"; result="bad facets.yaml"; ok=0; fi
     if [ "$ok" = 1 ] && ! raptor create iac-module -f "$dir" --dry-run; then log "::error::Validation failed for ${ref}"; fail "${ref} (validate)"; result="validation failed"; ok=0; fi
     # shellcheck disable=SC2086  # $ac is a deliberate empty-or-one-flag word
-    if [ "$ok" = 1 ] && ! raptor create iac-module -f "$dir" $ac --feature-branch --git-ref "${CI_HEAD_SHA:-}"; then log "::error::Preview registration failed for ${ref}"; fail "${ref} (preview)"; result="preview failed"; ok=0; fi
+    if [ "$ok" = 1 ] && ! raptor create iac-module -f "$dir" $ac --feature-branch --git-ref "${MC_HEAD_SHA:-}"; then log "::error::Preview registration failed for ${ref}"; fail "${ref} (preview)"; result="preview failed"; ok=0; fi
     echo "| \`${dir}\` | ${type:-?} | ${flavor:-?} | ${version:-?} | ${result} |" >> "$comment"
     log "::endgroup::"
   done
@@ -236,7 +242,7 @@ publish_modules() {
 cleanup_previews() {
   local dirs="$1"
   [ -n "$dirs" ] || return 0
-  if [ -z "${CI_OWNER_SHAS:-}" ]; then log "::warning::No ownership SHAs provided; preview ownership can't be verified. Skipping cleanup."; return 0; fi
+  if [ -z "${MC_OWNER_SHAS:-}" ]; then log "::warning::No ownership SHAs provided; preview ownership can't be verified. Skipping cleanup."; return 0; fi
   local modules_json list_ok
   if modules_json="$(raptor get iac-module -o json 2>/dev/null)"; then list_ok=1; else list_ok=0; modules_json='[]'; log "::warning::Could not list modules; cleanup will skip every module."; fi
   _owner_sha() { printf '%s' "$modules_json" | jq -r --arg t "$1" --arg f "$2" --arg v "$3" '(if type=="array" then . else [] end) | map(select(.intent==$t and .flavor==$f and .version==$v)) as $rows | ($rows | map(select(.stage=="PREVIEW"))[0]) as $p | ($rows | map(select(.stage=="PUBLISHED" and ((.previewModuleId // "") != "")))[0]) as $pub | if $p then ($p.gitRef // "") elif $pub then ($pub.previewGitRef // "") else "" end' 2>/dev/null || true; }
@@ -252,7 +258,7 @@ cleanup_previews() {
       if [ "$list_ok" = 1 ] && [ "$(_rows "$type" "$flavor" "$version")" != "0" ]; then log "::warning::${ref} is in the registry but no owning commit resolved; skipping."; else log "No preview slot recorded for ${ref}; nothing to clean up."; fi
       log "::endgroup::"; continue
     fi
-    owned="false"; while IFS= read -r sha; do [ -z "$sha" ] && continue; [ "$sha" = "$owner" ] && { owned="true"; break; }; done <<< "${CI_OWNER_SHAS}"
+    owned="false"; while IFS= read -r sha; do [ -z "$sha" ] && continue; [ "$sha" = "$owner" ] && { owned="true"; break; }; done <<< "${MC_OWNER_SHAS}"
     if [ "$owned" != "true" ]; then log "Preview for ${ref} is owned by another branch (commit=${owner}); leaving it."; log "::endgroup::"; continue; fi
     fresh="$(_owner_sha_fresh "$type" "$flavor" "$version")"
     if [ "$fresh" != "$owner" ]; then log "::warning::Preview slot for ${ref} changed between check and delete (was ${owner}, now ${fresh:-none}); skipping."; log "::endgroup::"; continue; fi
@@ -291,5 +297,5 @@ case "$MODE" in
   *) log "::error::Unknown MODE '${MODE}'"; exit 1 ;;
 esac
 
-log "Comment markdown in: ${CI_COMMENT_DIR}"
+log "Comment markdown in: ${MC_COMMENT_DIR}"
 report_gate

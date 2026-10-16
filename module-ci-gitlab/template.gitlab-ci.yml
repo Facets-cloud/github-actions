@@ -1,0 +1,101 @@
+# Facets Module CI — GitLab CI template.
+#
+# The GitLab counterpart of module-ci-action. A bootstrapped modules repo includes
+# this (pinned to a tag), and it runs the SAME shared module-ci-core.sh the GitHub
+# action runs — so the two hosts never drift. This file is only the thin GitLab
+# glue: resolve mode + map GitLab's CI variables to the generic MC_* contract,
+# fetch + run the core, and post the preview as a merge-request note.
+#
+# Consume it from a modules repo's .gitlab-ci.yml:
+#
+#   include:
+#     - remote: "https://raw.githubusercontent.com/Facets-cloud/github-actions/v1/module-ci-gitlab/template.gitlab-ci.yml"
+#
+# Required CI/CD variables (set by the control-plane bootstrap, like the GitHub secrets):
+#   CONTROL_PLANE_URL, FACETS_USERNAME, FACETS_TOKEN
+# Optional:
+#   FACETS_PATH_PREFIX      sub-path to modules/ (default "": modules/ at repo root)
+#   FACETS_MODULE_CI_REF    github-actions ref to fetch the core from (default "v1")
+#   FACETS_MR_TOKEN         a token that can write MR notes; when set, the preview
+#                           is posted as an MR comment (mirrors the GitHub github_token)
+#
+# NOTE (v1 scope): preview (on merge request) and publish (on default-branch push)
+# are supported. Cleanup-on-close is not — GitLab runs no pipeline when an MR is
+# closed, so preview cleanup needs a separate trigger (a webhook or a scheduled
+# sweep); tracked as a follow-up.
+
+variables:
+  FACETS_PATH_PREFIX: ""
+  FACETS_MODULE_CI_REF: "v1"
+  GIT_DEPTH: "0" # full history: the core diffs base..head and raptor reads git provenance
+
+facets-module-ci:
+  stage: test
+  image: ubuntu:22.04
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        paths:
+          - "${FACETS_PATH_PREFIX}modules/**/*"
+          - "${FACETS_PATH_PREFIX}outputs/**/*"
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"'
+      changes:
+        paths:
+          - "${FACETS_PATH_PREFIX}modules/**/*"
+          - "${FACETS_PATH_PREFIX}outputs/**/*"
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git curl jq unzip ca-certificates >/dev/null
+  script:
+    - |
+      set -euo pipefail
+      # Fetch the shared core, pinned to the same ref this template was included at.
+      curl -fsSL "https://raw.githubusercontent.com/Facets-cloud/github-actions/${FACETS_MODULE_CI_REF}/module-ci-core.sh" -o /tmp/module-ci-core.sh
+
+      # Map GitLab's predefined variables to the generic MC_* contract.
+      if [ "${CI_PIPELINE_SOURCE}" = "merge_request_event" ]; then
+        export MODE="preview"
+        # CI_MERGE_REQUEST_DIFF_BASE_SHA is already the merge base, so two-dot.
+        export MC_DIFF_RANGE="${CI_MERGE_REQUEST_DIFF_BASE_SHA}..${CI_COMMIT_SHA}"
+        export MC_HEAD_SHA="${CI_COMMIT_SHA}"
+      else
+        export MODE="publish"
+        if [ -n "${CI_COMMIT_BEFORE_SHA:-}" ] && [ "${CI_COMMIT_BEFORE_SHA}" != "0000000000000000000000000000000000000000" ] \
+           && git rev-parse --verify --quiet "${CI_COMMIT_BEFORE_SHA}^{commit}" >/dev/null 2>&1; then
+          export MC_DIFF_RANGE="${CI_COMMIT_BEFORE_SHA}..${CI_COMMIT_SHA}"
+        else
+          export MC_DIFF_RANGE=""
+        fi
+      fi
+      export PATH_PREFIX="${FACETS_PATH_PREFIX}"
+      export MC_COMMENT_DIR="${CI_PROJECT_DIR}/.facets-mci"
+      mkdir -p "${MC_COMMENT_DIR}"
+      # raptor auth: CONTROL_PLANE_URL / FACETS_USERNAME / FACETS_TOKEN come from CI/CD variables.
+      bash /tmp/module-ci-core.sh
+  after_script:
+    # after_script runs on success AND failure, so the preview comment posts even
+    # when the core gated on a bad module (mirrors the GitHub comment's if: always()).
+    - |
+      set +e
+      [ "${CI_PIPELINE_SOURCE}" = "merge_request_event" ] || exit 0
+      [ -n "${FACETS_MR_TOKEN:-}" ] || { echo "FACETS_MR_TOKEN not set; skipping MR preview comment."; exit 0; }
+      DIR="${CI_PROJECT_DIR}/.facets-mci"
+      BODY_FILE="$(mktemp)"
+      echo "<!-- facets-module-ci:preview -->" > "$BODY_FILE"
+      [ -f "${DIR}/preview_outputs.md" ] && { cat "${DIR}/preview_outputs.md" >> "$BODY_FILE"; echo "" >> "$BODY_FILE"; }
+      [ -f "${DIR}/preview_modules.md" ] && cat "${DIR}/preview_modules.md" >> "$BODY_FILE"
+      if [ ! -f "${DIR}/preview_outputs.md" ] && [ ! -f "${DIR}/preview_modules.md" ]; then
+        echo "No preview comment body; nothing to post."; exit 0
+      fi
+      API="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes"
+      # Upsert: find an existing bot note carrying our marker, else create one.
+      EXISTING="$(curl -fsS --header "PRIVATE-TOKEN: ${FACETS_MR_TOKEN}" "${API}?per_page=100" \
+        | jq -r '.[] | select(.body | contains("facets-module-ci:preview")) | .id' | head -n1)"
+      if [ -n "${EXISTING}" ]; then
+        curl -fsS --request PUT --header "PRIVATE-TOKEN: ${FACETS_MR_TOKEN}" \
+          --data-urlencode "body@${BODY_FILE}" "${API}/${EXISTING}" >/dev/null \
+          && echo "Updated MR preview note ${EXISTING}."
+      else
+        curl -fsS --request POST --header "PRIVATE-TOKEN: ${FACETS_MR_TOKEN}" \
+          --data-urlencode "body@${BODY_FILE}" "${API}" >/dev/null \
+          && echo "Posted MR preview note."
+      fi
