@@ -40,10 +40,23 @@ if [ -n "${BITBUCKET_PR_ID:-}" ]; then
   export MODE="preview"
   export MC_HEAD_SHA="${BITBUCKET_COMMIT}"
   dest="${BITBUCKET_PR_DESTINATION_BRANCH}"
-  git fetch -q origin "$dest" || true
-  base="$(git merge-base "origin/${dest}" HEAD 2>/dev/null || true)"
-  # Empty base (unreachable) => core falls back to the pushed commit's own tree.
-  export MC_DIFF_RANGE="${base:+${base}..${BITBUCKET_COMMIT}}"
+  # Explicit refspec: a bare `fetch origin $dest` only moves FETCH_HEAD, leaving
+  # origin/$dest absent so merge-base silently finds nothing.
+  git fetch -q origin "+refs/heads/${dest}:refs/remotes/origin/${dest}"
+  base="$(git merge-base "origin/${dest}" "${BITBUCKET_COMMIT}" 2>/dev/null || true)"
+  if [ -z "$base" ]; then
+    # Bitbucket clones shallow (depth 50); deepen once in case the base is older.
+    git fetch -q --unshallow origin "+refs/heads/${dest}:refs/remotes/origin/${dest}" 2>/dev/null \
+      || git fetch -q --deepen=200 origin "+refs/heads/${dest}:refs/remotes/origin/${dest}" 2>/dev/null || true
+    base="$(git merge-base "origin/${dest}" "${BITBUCKET_COMMIT}" 2>/dev/null || true)"
+  fi
+  # Fail loudly: a preview that diffs against the wrong base silently reports the
+  # wrong modules, worse than no preview at all.
+  if [ -z "$base" ]; then
+    echo "ERROR: no merge base between ${BITBUCKET_COMMIT} and origin/${dest}; cannot compute the PR diff." >&2
+    exit 1
+  fi
+  export MC_DIFF_RANGE="${base}..${BITBUCKET_COMMIT}"
 else
   # Default-branch push: publish. Bitbucket exposes no "previous commit" variable
   # like GitLab's CI_COMMIT_BEFORE_SHA, so diff the single merge commit.
