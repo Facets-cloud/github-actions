@@ -9,7 +9,7 @@ triggering event:
 
 | Event | Mode | What it does |
 |-------|------|--------------|
-| `pull_request` opened / synchronize / reopened | **preview** | Creates each changed output type the Control Plane does not have yet, then validates each changed module and registers a **feature-branch preview** pinned to the PR head commit. Optionally upserts a PR comment. |
+| `pull_request` opened / synchronize / reopened | **preview** | Creates each changed output type the Control Plane does not have yet, then validates each changed module against the publish rules (a non-empty root `README.md` and the compatibility declaration, see below) and registers a **feature-branch preview** pinned to the PR head commit. Optionally upserts a PR comment. |
 | `push` (to your default branch) | **publish** | Applies each changed output type, then uploads each changed module and **publishes** it (PREVIEW → PUBLISHED), declaring compatibility from the registry state — see **Compatibility declarations** below. |
 | `pull_request` **closed without merge** | **cleanup** | Deletes the preview each changed module owns — **only if** the preview belongs to a commit from this PR. |
 | `pull_request` **closed by merge** | **no-op** | Skipped: the concurrent `push` (publish) run re-uploads and publishes the module at the merge commit, so it owns the slot. Running cleanup here would be redundant and could race the publish. |
@@ -69,6 +69,11 @@ The action reads the published versions of that `intent/flavor` back off the
 Control Plane and passes the matching flag. Version **ordering** stays raptor's
 job: a "bump" that is not actually greater than every published version is
 rejected there, and should be.
+
+A pull request runs the same check before the merge: it passes the same flag to
+`raptor create iac-module --dry-run --publish`. That dry run also requires a
+non-empty `README.md` at the module root. So a PR fails on each rule that would
+fail its publish on merge.
 
 If the listing cannot be read, the module fails rather than publishing with a
 guessed declaration — reading a failed count as "nothing is published" would send

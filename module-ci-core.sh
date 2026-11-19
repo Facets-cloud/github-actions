@@ -194,6 +194,24 @@ apply_output_types() {
 
 auto_create_flag() { [ "${AUTO_CREATE_INTENTS:-true}" = "true" ] && printf '%s' "--auto-create"; }
 
+# Set DECLARATION to the compatibility flag that publishing <type>/<flavor>/<version>
+# needs, from the PUBLISHED versions on the control plane (see "Compatibility
+# declarations" in module-ci-action/README.md). Return 1 if the listing cannot be
+# read: a guessed declaration could send a first publication for a module that
+# already has one. Preview and publish use the same rule, so a PR checks what
+# its merge will do.
+publish_declaration() {
+  local type="$1" flavor="$2" version="$3" modules_json pub_any pub_target
+  DECLARATION=""
+  if ! modules_json="$(raptor get iac-module -o json 2>/dev/null)"; then log "::error::Could not list modules for ${type}/${flavor}/${version}"; return 1; fi
+  _family() { printf '%s' "$modules_json" | jq -r --arg t "$type" --arg f "$flavor" --arg v "$1" '(if type=="array" then . else [] end) | map(select(.intent==$t and .flavor==$f and .stage=="PUBLISHED" and ($v=="" or .version==$v))) | length' 2>/dev/null || echo ""; }
+  pub_any="$(_family "")"; pub_target="$(_family "$version")"
+  if [ -z "$pub_any" ] || [ -z "$pub_target" ]; then log "::error::Could not read published versions of ${type}/${flavor}"; return 1; fi
+  if [ "$pub_target" != "0" ]; then DECLARATION="--backward-compatible yes"; log "${version} already published: declaring a compatible update."
+  elif [ "$pub_any" != "0" ]; then DECLARATION="--versionupgrade"; log "${version} is a new contract version: declaring a version upgrade."
+  else log "First publication of ${type}/${flavor}: no declaration needed."; fi
+}
+
 preview_modules() {
   local dirs="$1" comment="${MC_COMMENT_DIR}/preview_modules.md" ac; ac="$(auto_create_flag)"
   [ -n "$dirs" ] || return 0
@@ -203,7 +221,11 @@ preview_modules() {
     log "::group::Preview ${dir}"
     type="$(meta "$dir" intent)"; flavor="$(meta "$dir" flavor)"; version="$(meta "$dir" version)"; ref="${type}/${flavor}/${version}"; result="previewed"; ok=1
     if [ -z "$type" ] || [ -z "$flavor" ] || [ -z "$version" ]; then log "::error::Could not read intent/flavor/version from ${dir}/facets.yaml"; fail "${dir} (metadata)"; result="bad facets.yaml"; ok=0; fi
-    if [ "$ok" = 1 ] && ! raptor create iac-module -f "$dir" --dry-run; then log "::error::Validation failed for ${ref}"; fail "${ref} (validate)"; result="validation failed"; ok=0; fi
+    if [ "$ok" = 1 ] && ! publish_declaration "$type" "$flavor" "$version"; then fail "${ref} (validate)"; result="validation failed"; ok=0; fi
+    # --publish makes the dry run apply the publish rules too (a non-empty README.md,
+    # the version declaration), so a PR fails on what would fail its merge.
+    # shellcheck disable=SC2086  # $DECLARATION is a deliberate empty-or-flag word list
+    if [ "$ok" = 1 ] && ! raptor create iac-module -f "$dir" --dry-run --publish $DECLARATION; then log "::error::Validation failed for ${ref}"; fail "${ref} (validate)"; result="validation failed"; ok=0; fi
     # shellcheck disable=SC2086  # $ac is a deliberate empty-or-one-flag word
     if [ "$ok" = 1 ] && ! raptor create iac-module -f "$dir" $ac --feature-branch --git-ref "${MC_HEAD_SHA:-}"; then log "::error::Preview registration failed for ${ref}"; fail "${ref} (preview)"; result="preview failed"; ok=0; fi
     echo "| \`${dir}\` | ${type:-?} | ${flavor:-?} | ${version:-?} | ${result} |" >> "$comment"
@@ -215,7 +237,7 @@ preview_modules() {
 publish_modules() {
   local dirs="$1" ac; ac="$(auto_create_flag)"
   [ -n "$dirs" ] || return 0
-  local dir type flavor version ref modules_json declaration pub_any pub_target
+  local dir type flavor version ref
   for dir in $dirs; do
     log "::group::Publish ${dir}"
     type="$(meta "$dir" intent)"; flavor="$(meta "$dir" flavor)"; version="$(meta "$dir" version)"
@@ -224,17 +246,10 @@ publish_modules() {
     log "Uploading ${ref}..."
     # shellcheck disable=SC2086  # $ac is a deliberate empty-or-one-flag word
     if ! raptor create iac-module -f "$dir" $ac; then log "::error::Upload failed for ${ref}"; fail "${ref} (upload)"; log "::endgroup::"; continue; fi
-    if ! modules_json="$(raptor get iac-module -o json 2>/dev/null)"; then log "::error::Could not list modules for ${ref}"; fail "${ref} (publish)"; log "::endgroup::"; continue; fi
-    _family() { printf '%s' "$modules_json" | jq -r --arg t "$type" --arg f "$flavor" --arg v "$1" '(if type=="array" then . else [] end) | map(select(.intent==$t and .flavor==$f and .stage=="PUBLISHED" and ($v=="" or .version==$v))) | length' 2>/dev/null || echo ""; }
-    pub_any="$(_family "")"; pub_target="$(_family "$version")"
-    if [ -z "$pub_any" ] || [ -z "$pub_target" ]; then log "::error::Could not read published versions of ${type}/${flavor} for ${ref}"; fail "${ref} (publish)"; log "::endgroup::"; continue; fi
-    declaration=""
-    if [ "$pub_target" != "0" ]; then declaration="--backward-compatible yes"; log "${version} already published: declaring a compatible update."
-    elif [ "$pub_any" != "0" ]; then declaration="--versionupgrade"; log "${version} is a new contract version: declaring a version upgrade."
-    else log "First publication of ${type}/${flavor}: no declaration needed."; fi
+    if ! publish_declaration "$type" "$flavor" "$version"; then fail "${ref} (publish)"; log "::endgroup::"; continue; fi
     log "Publishing ${ref}..."
-    # shellcheck disable=SC2086  # $declaration is a deliberate empty-or-flag word list
-    if ! raptor publish iac-module "$ref" $declaration; then log "::error::Publish failed for ${ref}"; fail "${ref} (publish)"; log "::endgroup::"; continue; fi
+    # shellcheck disable=SC2086  # $DECLARATION is a deliberate empty-or-flag word list
+    if ! raptor publish iac-module "$ref" $DECLARATION; then log "::error::Publish failed for ${ref}"; fail "${ref} (publish)"; log "::endgroup::"; continue; fi
     log "Published ${ref}"; log "::endgroup::"
   done
 }
